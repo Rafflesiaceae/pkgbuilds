@@ -1,0 +1,30 @@
+# Maintainer: Rafflesiaceae <rafflesiaceae.plant@gmail.com>
+
+pkgname=cwb
+pkgver=svn.r1559
+pkgrel=1
+pkgdesc="The IMS Open Corpus Workbench (CWB) is a collection of open-source tools for managing and querying large text corpora (ranging from 10 million to 2 billion words) with linguistic annotations."
+arch=('i686' 'x86_64')
+url="http://cwb.sourceforge.net/"
+license=('GPL2')
+depends=('pcre' 'glib2' 'ncurses' 'readline')
+makedepends=('gcc' 'make' 'pkgconf' 'perl' 'flex' 'bison' 'autoconf' 'svn')
+source=("svn+http://svn.code.sf.net/p/cwb/code/cwb/trunk")
+md5sums=('SKIP')
+
+pkgver() {
+    cd trunk
+    echo "svn.r$(svn info --show-item revision)"
+}
+
+build() {
+    cd trunk
+    make all $(install-scripts/config-basic)
+}
+
+package() {
+    cd trunk
+    make PREFIX="$pkgdir/usr" install
+}
+
+# vim:set ft=sh syn=sh ts=4 sw=4 et:
