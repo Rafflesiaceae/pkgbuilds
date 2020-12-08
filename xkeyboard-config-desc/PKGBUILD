@@ -1,0 +1,21 @@
+# Maintainer: Rafflesiaceae <rafflesiaceae.plant@gmail.com>
+
+pkgname=xkeyboard-config-desc
+pkgver=4237dc02
+pkgrel=1
+pkgdesc="X keyboard configuration files for custom desc layout"
+arch=('any')
+license=('GPL')
+depends=('xkeyboard-config')
+source=(desc)
+sha1sums=('SKIP')
+
+pkgver() {
+  # sha256sum desc | sed 's/ .*//'
+  sha256sum desc | cut -c1-8
+}
+
+package() {
+  install -Dm 644 desc "${pkgdir}"/usr/share/X11/xkb/symbols/desc
+}
+# vim:set ts=2 sw=2 et:
