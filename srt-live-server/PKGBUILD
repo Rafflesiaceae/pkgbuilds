@@ -1,0 +1,32 @@
+# Maintainer: Rafflesiaceae <rafflesiaceae.plant@gmail.com>
+
+pkgname=srt-live-server
+pkgver=V1.4.8.r6.g8c16a73
+pkgrel=1
+pkgdesc="Live streaming server based on SRT"
+arch=('any')
+url="https://github.com/Edward-Wu/srt-live-server"
+license=('MIT')
+depends=('srt' 'zlib')
+makedepends=('coreutils' 'sed' 'grep' 'git' 'make' 'gcc')
+source=("git+https://github.com/Edward-Wu/srt-live-server.git")
+sha256sums=('SKIP')
+
+pkgver() {
+    cd "$srcdir/$pkgname"
+    git describe --tags | sed 's/\([^-]*-g\)/r\1/;s/-/./g'
+}
+
+build() {
+    cd "$srcdir/$pkgname"
+    make "-j$(grep -c '^processor' /proc/cpuinfo)"
+}
+
+package() {
+    cd "$srcdir/$pkgname"
+    install -Dm755 "bin/slc" "${pkgdir}/usr/bin/slc"
+    install -Dm755 "bin/sls" "${pkgdir}/usr/bin/sls"
+    install -Dm644 "sls.conf" "${pkgdir}/usr/share/srt-live-server/sls.conf"
+}
+
+# vim:set ft=sh syn=sh ts=4 sw=4 et:
