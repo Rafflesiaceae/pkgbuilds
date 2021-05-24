@@ -6,7 +6,6 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 
 files=(
     "$PWD/./cwb/PKGBUILD"
-    "$PWD/./ssh-encrypt/PKGBUILD"
     "$PWD/./xkeyboard-config-desc/PKGBUILD"
     "$PWD/./xkeyboard-config-desc/desc"
     "$PWD/./srt-live-server/PKGBUILD"
