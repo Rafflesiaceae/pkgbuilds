@@ -1,0 +1,44 @@
+# Maintainer: Rafflesiaceae <rafflesiaceae.plant@gmail.com>
+# Contributor: Brad Fanella <cesura@archlinux.org>
+# Contributor: Alexander F Rødseth <xyproto@archlinux.org>
+# Contributor: Musikolo <musikolo@hotmail.com>
+# Contributor: Ruben Fonseca <fonseka@gmail.com>
+# Contributor: Andreas W. Hauser <andy-aur@splashground.de>
+
+# tracks the latest groovy version bundled within jenkins
+
+pkgname=groovy
+pkgver=2.4.12
+pkgrel=1
+pkgdesc='Programming language based on Java, inspired by Python, Ruby and Smalltalk'
+arch=('any')
+url='http://groovy-lang.org/'
+license=('Apache')
+depends=('bash' 'java-environment')
+optdepends=('groovy-docs: html and pdf documentation for Groovy')
+makedepends=()
+# .asc file is available for download, but there was no key available
+source=("https://archive.apache.org/dist/$pkgname/$pkgver/distribution/apache-$pkgname-binary-$pkgver.zip")
+sha256sums=('93b9a19c760c2af846afa0e9c78692d70186cdde36e070e9806fe11b84a8a7b6')
+
+prepare() {
+  	# Patch the scripts
+  	for f in "$pkgname-$pkgver/bin/"*; do
+    		sed 's:bin/env\ sh:bin/env\ sh\nGROOVY_HOME=/usr/share/groovy\nexport _JAVA_OPTIONS="-Dawt.useSystemAAFontSettings=gasp $_JAVA_OPTIONS":' -i "$f"
+  	done
+}
+
+package() {
+  	cd "$pkgname-$pkgver"
+
+  	# Create the directories and package the files
+  	install -d "$pkgdir/usr/share/groovy" "$pkgdir/usr/bin"
+  	cp -r lib conf "$pkgdir/usr/share/groovy"
+  	cp bin/* "$pkgdir/usr/bin"
+
+  	# Remove all DOS/Windows batch files
+  	find "$pkgdir" -name '*.bat' -exec rm {} \;
+
+  	# Package the license file
+  	install -Dm644 LICENSE -t "$pkgdir"/usr/share/licenses/$pkgname
+}
