@@ -29,7 +29,7 @@ prepare() {
   done
 
   cd "$pkgname-$pkgver/embeddable"
-  ln -s "$pkgname-all-$pkgver.jar" "$pkgname-all.jar"
+  ln -sf "$pkgname-all-$pkgver.jar" "$pkgname-all.jar"
 }
 
 package() {
