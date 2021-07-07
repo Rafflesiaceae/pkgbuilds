@@ -1,7 +1,7 @@
 // based on a keyboard map from an 'xkb/symbols/de' file
 
 // Maintainer: Rafflesiaceae <rafflesiaceae.plant@gmail.com>
-// desc v0.2 (2021-07-07) (121db42a32b90ee4)
+// desc v0.3 (2021-07-07) (39846588df1c8eb8)
 
 default
 xkb_symbols "basic" {
@@ -90,7 +90,7 @@ xkb_symbols "nodeadkeys" {
     key <AC11>	{ [ bracketleft, bracketright, asciicircum, asciicircum ] };
 
     // set ' on ü
-    key <AD11>  { [ apostrophe, question, diaeresis,, diaeresis ] };
+    key <AD11>  { [ apostrophe,      question,   diaeresis,   diaeresis ] };
     // }}}
 };
 
