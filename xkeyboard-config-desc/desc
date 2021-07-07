@@ -1,7 +1,7 @@
 // based on a keyboard map from an 'xkb/symbols/de' file
 
 // Maintainer: Rafflesiaceae <rafflesiaceae.plant@gmail.com>
-// desc v0.1 (2020-12-08) (b86686f42e42fd06)
+// desc v0.2 (2021-07-07) (121db42a32b90ee4)
 
 default
 xkb_symbols "basic" {
@@ -88,6 +88,9 @@ xkb_symbols "nodeadkeys" {
     // set brackets and braces on ö and ä
     key <AC10>	{ [   braceleft, braceright,   doubleacute, doubleacute ] };
     key <AC11>	{ [ bracketleft, bracketright, asciicircum, asciicircum ] };
+
+    // set ' on ü
+    key <AD11>  { [ apostrophe, question, diaeresis,, diaeresis ] };
     // }}}
 };
 

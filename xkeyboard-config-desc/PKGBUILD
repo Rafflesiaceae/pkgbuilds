@@ -1,7 +1,7 @@
 # Maintainer: Rafflesiaceae <rafflesiaceae.plant@gmail.com>
 
 pkgname=xkeyboard-config-desc
-pkgver=b3420a73
+pkgver=4bc670c4
 pkgrel=1
 pkgdesc="X keyboard configuration files for custom desc layout"
 arch=('any')
