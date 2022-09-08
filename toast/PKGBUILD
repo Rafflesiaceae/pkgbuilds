@@ -1,0 +1,44 @@
+# Maintainer: Rafflesiaceae <rafflesiaceae.plant@gmail.com>
+
+pkgname=toast
+pkgver=0.45.5
+pkgrel=1
+pkgdesc='Containerize your development and continuous integration environments.'
+arch=('any')
+url='https://github.com/stepchowfun/toast'
+license=('MIT')
+makedepends=('cargo-nightly')
+source=("https://github.com/stepchowfun/toast/archive/refs/tags/v${pkgver}.tar.gz")
+sha512sums=('35e4d52c4222e30e3496544f0f07a9ebc5d37cff88f642452d551d5fc3b6fe3628f5627d38d937be04501d1121eaf9f37d7b454434189d54dbdfd80bb4a5124b')
+
+prepare() {
+  cd $pkgname-$pkgver
+
+  export RUSTUP_TOOLCHAIN=nightly
+  cargo fetch --locked --target "$CARCH-unknown-linux-gnu"
+}
+
+build() {
+  cd $pkgname-$pkgver
+
+  export RUSTUP_TOOLCHAIN=nightly
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release --all-features
+}
+
+check() {
+  cd $pkgname-$pkgver
+
+  export RUSTUP_TOOLCHAIN=nightly
+  NO_COLOR=true cargo test --frozen --all-features
+}
+
+package() {
+  cd $pkgname-$pkgver
+
+  # @XXX toast produces a 'toast'-bin that collides with the 'toast'-bin of the
+  # 'gsm' package, which is a normal dependency of 'ffmpeg' and thus widely used
+  #
+  # we thus package toast as 'toastci' for now
+  install -Dm0755 "target/release/$pkgname" "$pkgdir/usr/bin/toastci"
+}
