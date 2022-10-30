@@ -1,0 +1,53 @@
+# Maintainer: Rafflesiaceae <rafflesiaceae.plant@gmail.com>
+
+pkgver=2021.11
+pkgverrel=1
+pkgrel=1
+pkgname=uclibc-m68k-coldfire
+_pkgname=m68k-coldfire--uclibc--stable-${pkgver}-${pkgverrel}
+pkgdesc="A large number of ready-to-use cross-compilation toolchains, targetting the Linux operating system on a large number of architectures."
+arch=('i686' 'x86_64')
+url="https://toolchains.bootlin.com/"
+license=('GPL2')
+depends=()
+makedepends=()
+source=("https://toolchains.bootlin.com/downloads/releases/toolchains/m68k-coldfire/tarballs/${_pkgname}.tar.bz2")
+sha256sums=('SKIP')
+OPTIONS=(!strip libtool staticlib emptydirs !buildflags)
+
+build() {
+    cd "$_pkgname"
+
+    # relocate sdk
+    ( # adapted from 'src/*/relocate-sdk.sh'
+        locfile="share/buildroot/sdk-location"
+        oldpath="$(cat "${locfile}")"
+        newpath="/opt/${_pkgname}"
+
+        # Make sure file uses the right language
+        export LC_ALL=C
+        # Replace the old path with the new one in all text files
+        grep -lr "${oldpath}" . | while read -r file ; do
+            if file -b --mime-type "${file}" | grep -q '^text/' && [ "${file}" != "${locfile}" ]
+            then
+                sed -i "s|${oldpath}|${newpath}|g" "${file}"
+            fi
+        done
+
+        # At the very end, we update the location file to not break the
+        # SDK if this script gets interruted.
+        sed -i "s|${oldpath}|${newpath}|g" ${locfile}
+    )
+
+}
+
+package() {
+    cd "$_pkgname"
+
+    target="${pkgdir}/opt/${_pkgname}"
+
+    mkdir -p "$target"
+    cp -R "." "$target"
+}
+
+# vim:set ft=sh syn=sh ts=4 sw=4 et:
