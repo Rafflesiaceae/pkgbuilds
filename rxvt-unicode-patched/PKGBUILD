@@ -67,6 +67,10 @@ build() {
     --enable-xft \
     --enable-xim \
     --enable-xterm-scroll
+
+  # disable terminfo installation (workaround FS#79143)
+  sed -Eie '/(^[[:blank:]]+\/usr\/bin\/tic)/s//#&/g' doc/Makefile
+
   make
 }
 
@@ -75,10 +79,6 @@ package() {
 
   install -D -m 644 "${startdir}/open-buffer-in-editor.pl" \
       "${pkgdir}/usr/lib/urxvt/perl/open-buffer-in-editor"
-
-  # workaround terminfo installation
-  export TERMINFO="$srcdir/terminfo"
-  install -d "$TERMINFO"
 
   make DESTDIR="$pkgdir" install
 }
