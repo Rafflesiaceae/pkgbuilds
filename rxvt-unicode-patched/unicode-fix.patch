@@ -1,0 +1,11 @@
+--- src/rxvtperl.xs.orig	2023-09-21 07:24:41.704604803 +0200
++++ src/rxvtperl.xs	2023-09-21 07:24:53.858060002 +0200
+@@ -399,7 +399,7 @@
+ {
+   if (!perl)
+     {
+-      rxvt_push_locale (""); // perl init destroys current locale
++      rxvt_push_locale ("C"); // perl init destroys current locale
+ 
+       {
+         perl_environ = rxvt_environ;
