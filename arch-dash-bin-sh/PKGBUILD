@@ -1,10 +1,9 @@
 # Maintainer: Rafflesiaceae <rafflesiaceae.plant@gmail.com>
-# Contributor: Denton Liu <liu.denton@gmail.com>
-# Contributor: Matthew T Hoare <matthew.t.hoare at gmail dot com>
+# shellcheck disable=SC2034,SC2164,SC2154
 
-pkgname=arch-dash-bin-sh
+pkgname='arch-dash-bin-sh'
 pkgver=1.0
-pkgrel=1
+pkgrel=2
 pkgdesc="Relinks '/bin/sh' to use 'dash' instead of 'bash'"
 arch=('any')
 license=('GPL')
