@@ -12,3 +12,6 @@ install-list*
 
 build-*/
 makerpm-*/
+
+__pycache__/
+*.pyc
