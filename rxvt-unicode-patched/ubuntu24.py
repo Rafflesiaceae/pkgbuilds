@@ -7,7 +7,6 @@ Usage: ./ubuntu24.py [--check | --force] [--install]
 
 from __future__ import annotations
 
-import argparse
 import getpass
 import os
 import re
@@ -16,7 +15,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from lib.ubuntu import BuildError, apt_install_debs, capture, download, dpkg_version, ensure_dir, run_cmd
+from lib import cli
+from lib.ubuntu import apt_install_debs, capture, download, dpkg_version, ensure_dir, run_cmd
 
 VERSION = "9.30"
 PKG_NAME = "rxvt-unicode-patched"
@@ -147,31 +147,19 @@ def build(install: bool) -> None:
         print(f"Package built!  Install with: sudo dpkg -i {' '.join(str(d) for d in debs)}")
 
 
+def check_up_to_date(args) -> str | None:
+    if dpkg_version(PKG_NAME) == WOULD_BUILD:
+        return f"{PKG_NAME} {WOULD_BUILD} is already installed. Use --force to rebuild."
+    return None
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("-i", "--install", action="store_true", help="Install the produced .deb after building")
-    parser.add_argument("-c", "--check", action="store_true", help="Report version status without building")
-    parser.add_argument("-f", "--force", action="store_true", help="Skip up-to-date check and always rebuild")
-    args = parser.parse_args()
-
-    if args.check and args.force:
-        print("error: --check and --force are mutually exclusive", file=sys.stderr)
-        return 1
-
-    if args.check:
-        return do_check()
-
-    # Without --force, skip the build when the installed package is already current.
-    if not args.force and dpkg_version(PKG_NAME) == WOULD_BUILD:
-        print(f"{PKG_NAME} {WOULD_BUILD} is already installed. Use --force to rebuild.")
-        return 0
-
-    try:
-        build(args.install)
-    except BuildError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
-    return 0
+    return cli.run(
+        build=lambda args: build(args.install),
+        do_check=lambda args: do_check(),
+        check_up_to_date=check_up_to_date,
+        description=__doc__,
+    )
 
 
 if __name__ == "__main__":

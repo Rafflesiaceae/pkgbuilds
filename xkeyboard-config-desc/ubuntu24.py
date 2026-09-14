@@ -7,14 +7,14 @@ Usage: ./ubuntu24.py [--check | --force] [--install]
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import shutil
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from lib.ubuntu import BuildError, apt_install_debs, dpkg_version, fail, run_cmd
+from lib import cli
+from lib.ubuntu import apt_install_debs, dpkg_version, fail, run_cmd
 
 PKG_NAME = "xkeyboard-config-desc"
 
@@ -88,14 +88,14 @@ def compute_version(start_dir: Path):
     return f"0~{raw_hash}"
 
 
-def do_check(start_dir: Path) -> int:
+def do_check() -> int:
     """Print a version status report; return the process exit code.
 
     Version is content-addressed via SHA-256 of the `desc` symbol file,
     so there is no separate upstream to check.
     """
     installed = dpkg_version(PKG_NAME)
-    would_build = compute_version(start_dir)
+    would_build = compute_version(Path.cwd())
     would_build_str = would_build or "(desc not found - run from xkeyboard-config-desc/ directory)"
 
     print(f"Package:      {PKG_NAME}")
@@ -171,35 +171,20 @@ Description: X keyboard configuration files for custom desc layout
         print(f"Install with: sudo apt install ./{final_deb.name}")
 
 
+def check_up_to_date(args) -> str | None:
+    pkg_ver = compute_version(Path.cwd())
+    if pkg_ver is not None and dpkg_version(PKG_NAME) == pkg_ver:
+        return f"{PKG_NAME} {pkg_ver} is already installed. Use --force to rebuild."
+    return None
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("-i", "--install", action="store_true", help="Install the produced .deb after building")
-    parser.add_argument("-c", "--check", action="store_true", help="Report version status without building")
-    parser.add_argument("-f", "--force", action="store_true", help="Skip up-to-date check and always rebuild")
-    args = parser.parse_args()
-
-    start_dir = Path.cwd()
-
-    if args.check and args.force:
-        print("error: --check and --force are mutually exclusive", file=sys.stderr)
-        return 1
-
-    if args.check:
-        return do_check(start_dir)
-
-    # Without --force, skip the build when the installed package is already current.
-    if not args.force:
-        pkg_ver = compute_version(start_dir)
-        if pkg_ver is not None and dpkg_version(PKG_NAME) == pkg_ver:
-            print(f"{PKG_NAME} {pkg_ver} is already installed. Use --force to rebuild.")
-            return 0
-
-    try:
-        build(args.install)
-    except BuildError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
-    return 0
+    return cli.run(
+        build=lambda args: build(args.install),
+        do_check=lambda args: do_check(),
+        check_up_to_date=check_up_to_date,
+        description=__doc__,
+    )
 
 
 if __name__ == "__main__":

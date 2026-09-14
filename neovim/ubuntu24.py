@@ -9,7 +9,6 @@ what is currently installed.
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import re
@@ -22,6 +21,7 @@ from pathlib import Path
 from tempfile import mkdtemp
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from lib import cli
 from lib.ubuntu import BuildError, apt_install_debs, capture, download, dpkg_version, fail, run_cmd, version_key
 
 PKG_NAME = "neovim"
@@ -238,39 +238,34 @@ Description: Neovim (repacked from upstream tarball)
         print(f"Install with: sudo apt install ./{out_deb.name}")
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+def add_arguments(parser) -> None:
     parser.add_argument("url", nargs="?", help="URL to the Neovim upstream tarball (.tar.gz or .tar.xz)")
-    parser.add_argument("-i", "--install", action="store_true", help="Install the produced .deb after building")
-    parser.add_argument("-c", "--check", action="store_true", help="Report version status without building")
-    parser.add_argument("-f", "--force", action="store_true", help="Skip up-to-date check and always rebuild")
     parser.add_argument("--skip-apt", action="store_true", help="Skip the apt-get install of build prerequisites")
-    args = parser.parse_args()
 
-    if args.check and args.force:
-        print("error: --check and --force are mutually exclusive", file=sys.stderr)
-        return 1
 
-    if args.check:
-        return do_check(args.url)
-
+def check_up_to_date(args) -> str | None:
     if not args.url:
-        print("error: a tarball URL is required. Usage: ./ubuntu24.py <url> [--install]", file=sys.stderr)
-        return 1
+        return None
+    url_version = version_from_url(args.url)
+    if url_version and dpkg_version(PKG_NAME) == f"{url_version}-1":
+        return f"{PKG_NAME} {url_version}-1 is already installed. Use --force to rebuild."
+    return None
 
-    # Without --force, skip the build when the installed package is already current.
-    if not args.force:
-        url_version = version_from_url(args.url)
-        if url_version and dpkg_version(PKG_NAME) == f"{url_version}-1":
-            print(f"{PKG_NAME} {url_version}-1 is already installed. Use --force to rebuild.")
-            return 0
 
-    try:
-        build(args.url, args.install, args.skip_apt)
-    except BuildError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
-    return 0
+def do_build(args) -> None:
+    if not args.url:
+        fail("a tarball URL is required. Usage: ./ubuntu24.py <url> [--install]")
+    build(args.url, args.install, args.skip_apt)
+
+
+def main() -> int:
+    return cli.run(
+        build=do_build,
+        do_check=lambda args: do_check(args.url),
+        check_up_to_date=check_up_to_date,
+        description=__doc__,
+        add_arguments=add_arguments,
+    )
 
 
 if __name__ == "__main__":

@@ -35,7 +35,6 @@ each build stage must install its output before the next stage can compile.
 
 from __future__ import annotations
 
-import argparse
 import os
 import re
 import shutil
@@ -44,8 +43,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from lib import cli
 from lib.ubuntu import (
-    BuildError, assert_ubuntu_24, capture, dpkg_version, ensure_dir,
+    assert_ubuntu_24, capture, dpkg_version, ensure_dir,
     fail, run_cmd, download, verify_md5, verify_sha256, version_key,
 )
 
@@ -563,31 +563,20 @@ def build() -> None:
     print("processes are replaced by the newly installed binaries/libraries.")
 
 
+def check_up_to_date(args) -> str | None:
+    if dpkg_version("evolution") == LOCAL_VERSION:
+        return f"Evolution {LOCAL_VERSION} is already installed. Use --force to rebuild."
+    return None
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("-i", "--install", action="store_true", help="Accepted for interface consistency; Evolution always installs during build")
-    parser.add_argument("-c", "--check", action="store_true", help="Report version status without building")
-    parser.add_argument("-f", "--force", action="store_true", help="Skip up-to-date check and always rebuild")
-    args = parser.parse_args()
-
-    if args.check and args.force:
-        print("error: --check and --force are mutually exclusive", file=sys.stderr)
-        return 1
-
-    if args.check:
-        return do_check()
-
-    # Without --force, skip the long multi-hour build when the package is current.
-    if not args.force and dpkg_version("evolution") == LOCAL_VERSION:
-        print(f"Evolution {LOCAL_VERSION} is already installed. Use --force to rebuild.")
-        return 0
-
-    try:
-        build()
-    except BuildError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
-    return 0
+    return cli.run(
+        build=lambda args: build(),
+        do_check=lambda args: do_check(),
+        check_up_to_date=check_up_to_date,
+        description=__doc__,
+        install_help="Accepted for interface consistency; Evolution always installs during build",
+    )
 
 
 if __name__ == "__main__":
