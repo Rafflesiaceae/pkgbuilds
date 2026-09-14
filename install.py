@@ -168,7 +168,35 @@ def dependency_name(requirement: str) -> str:
     return requirement
 
 
-def aur_build_is_current(directory: Path, package: Path) -> tuple[bool, str]:
+def makepkg_dependencies(directory: Path) -> set[str] | None:
+    result = command(
+        ["makepkg", "--printsrcinfo"], cwd=directory, capture=True
+    )
+    if result.returncode != 0:
+        show_command_error(result)
+        return None
+
+    # Architecture-specific dependency fields supplement the generic fields.
+    architecture = platform.machine()
+    dependency_keys = {
+        "depends",
+        "makedepends",
+        "checkdepends",
+        f"depends_{architecture}",
+        f"makedepends_{architecture}",
+        f"checkdepends_{architecture}",
+    }
+    dependencies: set[str] = set()
+    for line in result.stdout.splitlines():
+        key, separator, value = line.strip().partition(" = ")
+        if separator and key in dependency_keys:
+            dependencies.add(value)
+    return dependencies
+
+
+def aur_build_is_current(
+    directory: Path, package: Path, dependencies: Iterable[str]
+) -> tuple[bool, str]:
     result = command(
         ["bsdtar", "-xOf", package, ".BUILDINFO"], capture=True
     )
@@ -189,28 +217,6 @@ def aur_build_is_current(directory: Path, package: Path) -> tuple[bool, str]:
     ).hexdigest()
     if built_hash != current_hash:
         return False, "PKGBUILD changed"
-
-    result = command(
-        ["makepkg", "--printsrcinfo"], cwd=directory, capture=True
-    )
-    if result.returncode != 0:
-        show_command_error(result)
-        return False, "could not read dependency metadata"
-
-    architecture = platform.machine()
-    dependency_keys = {
-        "depends",
-        "makedepends",
-        "checkdepends",
-        f"depends_{architecture}",
-        f"makedepends_{architecture}",
-        f"checkdepends_{architecture}",
-    }
-    dependencies: set[str] = set()
-    for line in result.stdout.splitlines():
-        key, separator, value = line.strip().partition(" = ")
-        if separator and key in dependency_keys:
-            dependencies.add(value)
 
     built_packages = {
         line.removeprefix("installed = ")
@@ -417,9 +423,38 @@ class Installer:
             )
             return
 
+        dependencies = makepkg_dependencies(directory)
+        if dependencies is None:
+            self.fail(f"Could not read dependency metadata for {entry}")
+            return
+
+        if dependencies:
+            print("==> Updating AUR package dependencies...")
+            # makepkg only installs missing dependencies, whereas yay also
+            # upgrades installed AUR dependencies named as explicit targets.
+            dependency_targets = sorted(
+                {dependency_name(item) for item in dependencies}
+            )
+            result = command(
+                [
+                    "yay",
+                    "-S",
+                    "--needed",
+                    "--asdeps",
+                    "--noconfirm",
+                    "--",
+                    *dependency_targets,
+                ]
+            )
+            if result.returncode != 0:
+                self.fail(f"Could not update dependencies for {entry}")
+                return
+
         package = find_cached_aur_package(directory, entry, aur_version)
         if package is not None:
-            current, reason = aur_build_is_current(directory, package)
+            current, reason = aur_build_is_current(
+                directory, package, dependencies
+            )
             if current:
                 print(
                     "==> Reusing cached build; PKGBUILD and dependencies "
