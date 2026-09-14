@@ -44,7 +44,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from nupkg_ubuntu import (
+from lib.ubuntu import (
     BuildError, assert_ubuntu_24, capture, dpkg_version, ensure_dir,
     fail, run_cmd, download, verify_md5, verify_sha256, version_key,
 )

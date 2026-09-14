@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from nupkg_ubuntu import BuildError, apt_install_debs, capture, download, dpkg_version, ensure_dir, run_cmd
+from lib.ubuntu import BuildError, apt_install_debs, capture, download, dpkg_version, ensure_dir, run_cmd
 
 VERSION = "9.30"
 PKG_NAME = "rxvt-unicode-patched"

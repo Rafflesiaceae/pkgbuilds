@@ -22,7 +22,7 @@ from pathlib import Path
 from tempfile import mkdtemp
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from nupkg_ubuntu import BuildError, apt_install_debs, capture, download, dpkg_version, fail, run_cmd, version_key
+from lib.ubuntu import BuildError, apt_install_debs, capture, download, dpkg_version, fail, run_cmd, version_key
 
 PKG_NAME = "neovim"
 # Fallback runtime deps when dpkg-shlibdeps cannot resolve the shared libraries.

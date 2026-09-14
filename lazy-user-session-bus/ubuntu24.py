@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from nupkg_ubuntu import BuildError, apt_install_debs, dpkg_version, fail, run_cmd
+from lib.ubuntu import BuildError, apt_install_debs, dpkg_version, fail, run_cmd
 
 PKG_NAME = "lazy-user-session-bus"
 PKG_VER = "1-1"

@@ -1,11 +1,11 @@
-"""Shared helpers for Ubuntu package build scripts (nupkg_ubuntu.py).
+"""Shared helpers for Ubuntu package build scripts (lib/ubuntu.py).
 
 Import from a sibling package directory with:
 
     import sys
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from nupkg_ubuntu import ...
+    from lib.ubuntu import ...
 
 Convention: helpers raise BuildError on failure, which callers catch once at
 the top of main() and report as `error: <message>` with a non-zero exit.
