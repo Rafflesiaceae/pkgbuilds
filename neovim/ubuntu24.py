@@ -1,100 +1,116 @@
 #!/usr/bin/env python3
-"""Repack an upstream Neovim release tarball as a native .deb on Ubuntu 24.04.
+"""Repack the latest upstream Neovim GitHub release as a native .deb on Ubuntu 24.04.
 
-Usage: ./ubuntu24.py [<tarball-url>] [--check | --force] [--install] [--skip-apt]
+Usage: ./ubuntu24.py [--check | --force] [--install] [--skip-apt]
 
---check without a URL still queries GitHub for the latest release and reports
-what is currently installed.
+The latest release is always resolved from GitHub; there is no way to pin a
+specific version or tarball URL.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import re
 import shutil
 import socket
 import subprocess
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import mkdtemp
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from lib import cli
-from lib.ubuntu import BuildError, apt_install_debs, capture, download, dpkg_version, fail, run_cmd, version_key
+from lib.ubuntu import BuildError, apt_install_debs, capture, download, dpkg_version, fail, run_cmd
 
 PKG_NAME = "neovim"
 # Fallback runtime deps when dpkg-shlibdeps cannot resolve the shared libraries.
 FALLBACK_DEPS = "libc6, libgcc-s1, libstdc++6, libuv1t64, libvterm0, libluajit-5.1-2"
 
-VERSION_FROM_URL_RE = re.compile(r"/v(\d+\.\d+\.\d+)")
-NVIM_VERSION_RE = re.compile(r"v(\d+\.\d+\.\d+\S*)")
+GITHUB_LATEST_RELEASE_API = "https://api.github.com/repos/neovim/neovim/releases/latest"
+
+# Maps a dpkg architecture name to the suffix used in Neovim's GitHub release
+# asset filenames (nvim-linux-<suffix>.tar.gz).
+RELEASE_ASSET_ARCH = {"amd64": "x86_64", "arm64": "arm64"}
 
 
-def version_from_url(url: str):
-    """Extract the Neovim version string from a GitHub release tarball URL."""
-    m = VERSION_FROM_URL_RE.search(url)
-    return m.group(1) if m else None
-
-
-def github_latest():
-    """Fetch the latest Neovim release tag from the GitHub API.
+def github_latest_release():
+    """Fetch the latest Neovim release metadata from the GitHub API.
 
     Returns None on network error or unexpected JSON shape.
     """
     result = subprocess.run(
-        ["curl", "-fsSL", "https://api.github.com/repos/neovim/neovim/releases/latest"],
+        ["curl", "-fsSL", GITHUB_LATEST_RELEASE_API],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
         return None
     try:
-        return json.loads(result.stdout)["tag_name"].lstrip("v")
-    except (json.JSONDecodeError, KeyError):
+        return json.loads(result.stdout)
+    except json.JSONDecodeError:
         return None
 
 
-def do_check(url) -> int:
-    """Print a version status report; return the process exit code.
+def github_latest():
+    """Return the latest Neovim release tag (without the leading 'v'), or None."""
+    release = github_latest_release()
+    if release is None:
+        return None
+    try:
+        return release["tag_name"].lstrip("v")
+    except KeyError:
+        return None
 
-    Checks the installed package, what a given URL would produce, and
-    the latest release on GitHub.
+
+def latest_release_asset(arch: str) -> tuple[str, str]:
+    """Resolve the (version, download URL) of the latest release's Linux
+    tarball for arch, a dpkg architecture name (e.g. "amd64", "arm64").
+
+    Raises BuildError when the architecture is unsupported or the release
+    metadata/asset cannot be found.
+    """
+    asset_arch = RELEASE_ASSET_ARCH.get(arch)
+    if asset_arch is None:
+        fail(f"No known Neovim release asset for architecture {arch!r}")
+    release = github_latest_release()
+    if release is None:
+        fail("Could not fetch the latest Neovim release from GitHub.")
+    version = release.get("tag_name", "").lstrip("v")
+    if not version:
+        fail("Latest Neovim release has no tag_name.")
+    asset_name = f"nvim-linux-{asset_arch}.tar.gz"
+    for asset in release.get("assets", []):
+        if asset.get("name") == asset_name:
+            return version, asset["browser_download_url"]
+    fail(f"Latest Neovim release (v{version}) has no asset named {asset_name}")
+
+
+def do_check() -> int:
+    """Print a version status report comparing the installed package against
+    the latest GitHub release; return the process exit code.
     """
     installed = dpkg_version(PKG_NAME)
-    url_version = version_from_url(url) if url else None
-    would_build = f"{url_version}-1" if url_version else None
-
     print(f"Package:      {PKG_NAME}")
     print(f"Installed:    {installed or '(not installed)'}")
-    print(f"Builds:       {would_build or '(no URL given)'}")
 
     print("              (fetching GitHub latest...)")
     upstream = github_latest()
-    upstream_str = f"{upstream} (github.com/neovim/neovim/releases)" if upstream else "(could not fetch)"
-    print(f"Upstream:     {upstream_str}")
+    if upstream is None:
+        print("Upstream:     (could not fetch)")
+        print("Status:       UNKNOWN (could not determine the latest release)")
+        return 1
+    print(f"Upstream:     {upstream} (github.com/neovim/neovim/releases)")
 
-    needs_build = would_build is not None and installed != would_build
-    newer_upstream = (
-        upstream is not None and url_version is not None
-        and version_key(upstream) > version_key(url_version)
-    )
-    not_installed_no_url = url is None and installed is None
+    would_build = f"{upstream}-1"
+    print(f"Builds:       {would_build}")
 
-    if needs_build:
+    if installed != would_build:
         print("Status:       NEEDS BUILD")
-        return 1
-    if newer_upstream:
-        print("Status:       NEWER UPSTREAM AVAILABLE")
-        return 1
-    if not_installed_no_url:
-        print("Status:       NOT INSTALLED")
         return 1
     print("Status:       UP TO DATE")
     return 0
 
 
-def build(url: str, install: bool, skip_apt: bool) -> None:
+def build(install: bool, skip_apt: bool) -> None:
     pkgname = os.environ.get("PKGNAME", "neovim")
     revision = os.environ.get("REVISION", "1")
     arch = os.environ.get("ARCH") or capture(["dpkg", "--print-architecture"])
@@ -108,6 +124,10 @@ def build(url: str, install: bool, skip_apt: bool) -> None:
     except BuildError:
         hostname = socket.gethostname()
     maintainer = os.environ.get("MAINTAINER", f"{user} <{user}@{hostname}>")
+
+    print("Resolving the latest Neovim release from GitHub...")
+    version, url = latest_release_asset(arch)
+    print(f"Latest release: v{version} ({url})")
 
     start_dir = Path.cwd()
     workdir = Path(mkdtemp())
@@ -147,21 +167,6 @@ def build(url: str, install: bool, skip_apt: bool) -> None:
     nvim_bin = root / "bin" / "nvim"
     if not nvim_bin.is_file():
         fail(f"Expected executable at {nvim_bin}")
-
-    # Determine version: prefer URL-embedded vX.Y.Z, then ask nvim itself.
-    version = os.environ.get("VERSION") or version_from_url(url)
-    if not version:
-        # Run nvim with its own lib dir on LD_LIBRARY_PATH to avoid link errors.
-        env = os.environ.copy()
-        env["LD_LIBRARY_PATH"] = f"{root / 'lib'}:{root / 'lib' / 'nvim'}"
-        result = subprocess.run([nvim_bin, "--version"], capture_output=True, text=True, env=env)
-        first_line = result.stdout.splitlines()[0] if result.stdout else ""
-        m = NVIM_VERSION_RE.search(first_line)
-        if m:
-            # Sanitise any characters illegal in Debian version strings.
-            version = re.sub(r"[^A-Za-z0-9.+:~-]", "", m.group(1).replace("/", "."))
-        else:
-            version = f"0.0~repack+{datetime.now(timezone.utc).strftime('%Y%m%d%H%M')}"
 
     out_deb = Path(os.environ.get("OUT_DEB") or start_dir / f"{pkgname}_{version}-{revision}_{arch}.deb")
 
@@ -239,29 +244,24 @@ Description: Neovim (repacked from upstream tarball)
 
 
 def add_arguments(parser) -> None:
-    parser.add_argument("url", nargs="?", help="URL to the Neovim upstream tarball (.tar.gz or .tar.xz)")
     parser.add_argument("--skip-apt", action="store_true", help="Skip the apt-get install of build prerequisites")
 
 
 def check_up_to_date(args) -> str | None:
-    if not args.url:
-        return None
-    url_version = version_from_url(args.url)
-    if url_version and dpkg_version(PKG_NAME) == f"{url_version}-1":
-        return f"{PKG_NAME} {url_version}-1 is already installed. Use --force to rebuild."
+    upstream = github_latest()
+    if upstream and dpkg_version(PKG_NAME) == f"{upstream}-1":
+        return f"{PKG_NAME} {upstream}-1 is already installed. Use --force to rebuild."
     return None
 
 
 def do_build(args) -> None:
-    if not args.url:
-        fail("a tarball URL is required. Usage: ./ubuntu24.py <url> [--install]")
-    build(args.url, args.install, args.skip_apt)
+    build(args.install, args.skip_apt)
 
 
 def main() -> int:
     return cli.run(
         build=do_build,
-        do_check=lambda args: do_check(args.url),
+        do_check=lambda args: do_check(),
         check_up_to_date=check_up_to_date,
         description=__doc__,
         add_arguments=add_arguments,
