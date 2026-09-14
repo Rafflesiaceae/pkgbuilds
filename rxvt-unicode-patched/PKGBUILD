@@ -22,11 +22,13 @@ conflicts=(rxvt-unicode)
 source=(http://dist.schmorp.de/rxvt-unicode/Attic/$_pkgname-$pkgver.tar.bz2
         'font-width-fix.patch'
         'line-spacing-fix.patch'
+        'unicode-fix.patch'
         'open-buffer-in-editor.pl'
         )
 sha1sums=('700265a255eedf0f553cadfe5484bf71f8fb74c2'
           '01ee8f212add79a158dcd4ed78d0ea1324bdc59b'
           'b7fde1c46af45e831828738874f14b092b1e795f'
+          'SKIP'
           'SKIP'
           )
 
@@ -35,6 +37,7 @@ prepare() {
 
   patch -p0 -i ../font-width-fix.patch
   patch -p0 -i ../line-spacing-fix.patch
+  patch -p0 -i ../unicode-fix.patch
 }
 
 build() {
