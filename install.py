@@ -22,6 +22,22 @@ AUR_BUILD_ROOT = PKGBUILD_ROOT / ".aur-build"
 SEPARATOR = "=" * 64
 
 
+def detect_os() -> tuple[str, str]:
+    """Return (os_id, version_id) from /etc/os-release, or ('', '') on failure."""
+    try:
+        # freedesktop_os_release is available in Python 3.10+.
+        info = platform.freedesktop_os_release()
+        return info.get("ID", ""), info.get("VERSION_ID", "")
+    except (AttributeError, OSError):
+        return "", ""
+
+
+def is_ubuntu_24() -> bool:
+    """Return True when running on Ubuntu 24.x."""
+    os_id, version_id = detect_os()
+    return os_id == "ubuntu" and version_id.startswith("24.")
+
+
 @dataclass
 class Stats:
     processed: int = 0
@@ -287,6 +303,36 @@ class Installer:
             print(f"==> Queued {package.name} for installation")
         self.stats.processed += 1
 
+    def process_ubuntu24(self, entry: str) -> None:
+        """Run <entry>/ubuntu24.nu --install for an Ubuntu 24.x system."""
+        heading(f"==> UBUNTU24: {entry}")
+        directory = PKGBUILD_ROOT / entry
+
+        if not directory.is_dir():
+            self.fail(f"Directory does not exist: {directory}")
+            return
+
+        script = directory / "ubuntu24.nu"
+        if not script.is_file():
+            # Treat packages without an ubuntu24.nu as unchecked/unsupported.
+            print(f"==> No ubuntu24.nu found in {entry}; skipping.")
+            self.stats.unchecked += 1
+            return
+
+        if self.check_only:
+            # In check mode we cannot run the script; just flag as unchecked.
+            print("==> UNCHECKED: ubuntu24.nu present but check mode is not supported")
+            self.stats.unchecked += 1
+            return
+
+        print(f"==> Running ubuntu24.nu --install for {entry}...")
+        result = command(["nu", script, "--install"], cwd=directory)
+        if result.returncode != 0:
+            self.fail(f"ubuntu24.nu failed for {entry}")
+            return
+
+        self.stats.processed += 1
+
     def process_local(self, entry: str) -> None:
         heading(f"==> LOCAL: {entry}")
         directory = PKGBUILD_ROOT / entry
@@ -497,6 +543,37 @@ class Installer:
             )
             return 1
 
+        # Dispatch to the Ubuntu 24.x flow when running on that distro.
+        if is_ubuntu_24():
+            return self._run_ubuntu24()
+
+        return self._run_arch()
+
+    def _run_ubuntu24(self) -> int:
+        """Process all install-list entries via their ubuntu24.nu scripts."""
+        for entry in read_package_list(INSTALL_LIST):
+            if not valid_entry(entry):
+                self.fail(f"Invalid install-list entry: {entry}")
+                continue
+            self.process_ubuntu24(entry)
+
+        if self.check_only:
+            heading("Check summary (Ubuntu 24)")
+            print(f"Unchecked: {self.stats.unchecked}")
+            print(f"Failed:    {self.stats.failed}")
+            print(SEPARATOR)
+            return 1 if self.stats.failed else 0
+
+        print()
+        print(SEPARATOR)
+        print(f"Processed: {self.stats.processed}")
+        print(f"Skipped:   {self.stats.unchecked}")
+        print(f"Failed:    {self.stats.failed}")
+        print(SEPARATOR)
+        return 1 if self.stats.failed else 0
+
+    def _run_arch(self) -> int:
+        """Process all install-list and install-list-aur entries via pacman/AUR."""
         if not self.check_only:
             AUR_BUILD_ROOT.mkdir(parents=True, exist_ok=True)
 
