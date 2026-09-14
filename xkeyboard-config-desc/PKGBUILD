@@ -2,7 +2,7 @@
 
 pkgname=xkeyboard-config-desc
 pkgver=a2f64784
-pkgrel=1
+pkgrel=2
 pkgdesc="X keyboard configuration files for custom desc layout"
 arch=('any')
 license=('GPL')
@@ -15,7 +15,7 @@ pkgver() {
 }
 
 package() {
-    install -Dm 644 desc "${pkgdir}"/usr/share/X11/xkb/symbols/desc
+    install -Dm644 "$srcdir/desc" "$pkgdir/usr/share/xkeyboard-config-2/symbols/desc"
 }
 
 # vim:set ft=sh syn=sh ts=4 sw=4 et:
