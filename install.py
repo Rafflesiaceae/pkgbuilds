@@ -91,8 +91,9 @@ def read_package_list(path: Path) -> list[str]:
 
     entries: list[str] = []
     for raw_line in path.read_text().splitlines():
-        entry = raw_line.strip()
-        if entry and not entry.startswith("#"):
+        # Strip inline comments before trimming whitespace.
+        entry = raw_line.partition("#")[0].strip()
+        if entry:
             entries.append(entry)
     return entries
 
