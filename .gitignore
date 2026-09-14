@@ -9,3 +9,6 @@ wip
 **/*.rpm
 
 install-list*
+
+build-*/
+makerpm-*/
