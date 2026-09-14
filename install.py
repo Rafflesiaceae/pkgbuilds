@@ -321,9 +321,19 @@ class Installer:
             return
 
         if self.check_only:
-            # In check mode we cannot run the script; just flag as unchecked.
-            print("==> UNCHECKED: ubuntu24.py present but check mode is not supported")
-            self.stats.unchecked += 1
+            print(f"==> Running ubuntu24.py --check for {entry}...")
+            result = command(["python", script, "--check"], cwd=directory)
+            # ubuntu24.py's --check exits 0 when up to date, 1 when a build
+            # is needed; any other code means the check itself broke.
+            if result.returncode == 0:
+                pass
+            elif result.returncode == 1:
+                self.stats.outdated += 1
+            else:
+                self.fail(
+                    f"ubuntu24.py --check failed for {entry} "
+                    f"(exit code {result.returncode})"
+                )
             return
 
         print(f"==> Running ubuntu24.py --install for {entry}...")
@@ -560,10 +570,13 @@ class Installer:
 
         if self.check_only:
             heading("Check summary (Ubuntu 24)")
-            print(f"Unchecked: {self.stats.unchecked}")
-            print(f"Failed:    {self.stats.failed}")
+            print(f"Needs update/build: {self.stats.outdated}")
+            print(f"Unchecked:          {self.stats.unchecked}")
+            print(f"Failed:             {self.stats.failed}")
             print(SEPARATOR)
-            return 1 if self.stats.failed else 0
+            if self.stats.failed:
+                return 1
+            return 2 if self.stats.outdated else 0
 
         print()
         print(SEPARATOR)
