@@ -1,0 +1,151 @@
+From 568015ea86a9f84cf171e23276bbbec6ea318e6f Mon Sep 17 00:00:00 2001
+From: Codex <codex@localhost>
+Date: Sun, 13 Sep 2026 08:25:40 +0200
+Subject: [PATCH 1/3] Suspend volume meters when unmapped
+
+Peak-monitor streams continue delivering samples when the window is hidden, even
+though their progress bars cannot be drawn.
+
+Cork every peak stream while the window is unmapped or suspended, resume them
+when it becomes active again, and start newly created streams corked when
+appropriate.
+---
+ src/mainwindow.cc | 65 +++++++++++++++++++++++++++++++----------------
+ src/mainwindow.h  |  6 +++++
+ 2 files changed, 49 insertions(+), 22 deletions(-)
+
+diff --git a/src/mainwindow.cc b/src/mainwindow.cc
+index c6ca964..db49900 100644
+--- a/src/mainwindow.cc
++++ b/src/mainwindow.cc
+@@ -194,12 +194,52 @@ MainWindow* MainWindow::create(bool maximize) {
+     return w;
+ }
+
++bool MainWindow::volumeMetersActive() const {
++    return showVolumeMetersCheckButton->get_active() && get_mapped() && !is_suspended();
++}
++
++void MainWindow::setPeakStreamsCorked(bool corked) {
++    auto corkStreams = [corked](const auto &widgets) {
++        for (const auto &entry : widgets) {
++            pa_stream *stream = entry.second->peak;
++            if (!stream)
++                continue;
++
++            pa_operation *operation = pa_stream_cork(stream, corked ? 1 : 0, NULL, NULL);
++            if (operation)
++                pa_operation_unref(operation);
++        }
++    };
++
++    corkStreams(sinkWidgets);
++    corkStreams(sourceWidgets);
++    corkStreams(sinkInputWidgets);
++    corkStreams(sourceOutputWidgets);
++}
++
+ void MainWindow::on_realize() {
+     Gtk::Window::on_realize();
+
++    property_suspended().signal_changed().connect(sigc::mem_fun(*this, &MainWindow::onSuspendedChanged));
+     set_cursor(Gdk::Cursor::create("wait"));
+ }
+
++void MainWindow::onSuspendedChanged() {
++    setPeakStreamsCorked(!volumeMetersActive());
++}
++
++void MainWindow::on_map() {
++    Gtk::Window::on_map();
++
++    setPeakStreamsCorked(!volumeMetersActive());
++}
++
++void MainWindow::on_unmap() {
++    setPeakStreamsCorked(true);
++
++    Gtk::Window::on_unmap();
++}
++
+ bool MainWindow::on_key_press_event(guint keyval, guint keycode, Gdk::ModifierType state) {
+
+     if ((state & Gdk::ModifierType::CONTROL_MASK) == Gdk::ModifierType::CONTROL_MASK) {
+@@ -692,7 +732,7 @@ pa_stream* MainWindow::createMonitorStreamForSource(uint32_t source_idx, uint32_
+
+     flags = (pa_stream_flags_t) (PA_STREAM_DONT_MOVE | PA_STREAM_PEAK_DETECT | PA_STREAM_ADJUST_LATENCY |
+                                  (suspend ? PA_STREAM_DONT_INHIBIT_AUTO_SUSPEND : PA_STREAM_NOFLAGS) |
+-                                 (!showVolumeMetersCheckButton->get_active() ? PA_STREAM_START_CORKED : PA_STREAM_NOFLAGS));
++                                 (!volumeMetersActive() ? PA_STREAM_START_CORKED : PA_STREAM_NOFLAGS));
+
+     if (pa_stream_connect_record(s, t, &attr, flags) < 0) {
+         show_error(this, _("Failed to connect monitoring stream"));
+@@ -1415,42 +1455,23 @@ void MainWindow::onSourceOutputTypeComboBoxChanged() {
+
+ void MainWindow::onShowVolumeMetersCheckButtonToggled() {
+     bool state = showVolumeMetersCheckButton->get_active();
+-    pa_operation *o;
++
++    setPeakStreamsCorked(!volumeMetersActive());
+
+     for (std::map<uint32_t, SinkWidget*>::iterator it = sinkWidgets.begin() ; it != sinkWidgets.end(); it++) {
+         SinkWidget *sw = it->second;
+-        if (sw->peak) {
+-            o = pa_stream_cork(sw->peak, (int)!state, NULL, NULL);
+-            if (o)
+-                pa_operation_unref(o);
+-        }
+         sw->setVolumeMeterVisible(state);
+     }
+     for (std::map<uint32_t, SourceWidget*>::iterator it = sourceWidgets.begin() ; it != sourceWidgets.end(); it++) {
+         SourceWidget *sw = it->second;
+-        if (sw->peak) {
+-            o = pa_stream_cork(sw->peak, (int)!state, NULL, NULL);
+-            if (o)
+-                pa_operation_unref(o);
+-        }
+         sw->setVolumeMeterVisible(state);
+     }
+     for (std::map<uint32_t, SinkInputWidget*>::iterator it = sinkInputWidgets.begin() ; it != sinkInputWidgets.end(); it++) {
+         SinkInputWidget *sw = it->second;
+-        if (sw->peak) {
+-            o = pa_stream_cork(sw->peak, (int)!state, NULL, NULL);
+-            if (o)
+-                pa_operation_unref(o);
+-        }
+         sw->setVolumeMeterVisible(state);
+     }
+     for (std::map<uint32_t, SourceOutputWidget*>::iterator it = sourceOutputWidgets.begin() ; it != sourceOutputWidgets.end(); it++) {
+         SourceOutputWidget *sw = it->second;
+-        if (sw->peak) {
+-            o = pa_stream_cork(sw->peak, (int)!state, NULL, NULL);
+-            if (o)
+-                pa_operation_unref(o);
+-        }
+         sw->setVolumeMeterVisible(state);
+     }
+ }
+diff --git a/src/mainwindow.h b/src/mainwindow.h
+index a9fb4a2..f152a9b 100644
+--- a/src/mainwindow.h
++++ b/src/mainwindow.h
+@@ -126,10 +126,16 @@ public:
+ #endif
+
+ protected:
++    void on_map() override;
++    void on_unmap() override;
+     virtual void on_realize();
+     virtual bool on_key_press_event(guint keyval, guint keycode, Gdk::ModifierType state);
+
+ private:
++    bool volumeMetersActive() const;
++    void setPeakStreamsCorked(bool corked);
++    void onSuspendedChanged();
++
+     gboolean m_connected;
+     gchar* m_config_filename;
+ };
+--
+2.55.0
+

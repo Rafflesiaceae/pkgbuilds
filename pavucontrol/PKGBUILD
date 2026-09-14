@@ -1,0 +1,70 @@
+# Maintainer: Jan Alexander Steffens (heftig) <heftig@archlinux.org>
+# Contributor: Daniel J Griffiths <ghost1227@archlinux.us>
+# Contributor: Corrado Primier <bardo@aur.archlinux.org>
+# Contributor: William Rea <sillywilly@gmail.com>
+
+pkgname=pavucontrol
+pkgver=6.2
+pkgrel=4
+epoch=1
+pkgdesc="PulseAudio Volume Control"
+url="https://freedesktop.org/software/pulseaudio/pavucontrol/"
+arch=(x86_64)
+license=(GPL-2.0-or-later)
+depends=(
+  glib2
+  glibc
+  glibmm-2.68
+  gtk4
+  gtkmm-4.0
+  json-glib
+  libcanberra
+  libgcc
+  libpulse
+  libsigc++-3.0
+  libstdc++
+  libx11
+)
+makedepends=(
+  git
+  lynx
+  meson
+)
+checkdepends=(tidy)
+source=(
+  "git+https://gitlab.freedesktop.org/pulseaudio/pavucontrol.git?signed#tag=v$pkgver"
+  0001-Suspend-volume-meters-when-unmapped.patch
+  0002-Track-X11-frame-visibility-for-volume-meters.patch
+  0003-Pause-X11-property-events-while-the-frame-is-hidden.patch
+)
+b2sums=(
+  bcedd14881a304580dd7998d62a89d4e1f7f8fcb9d8c6d3cf773df3716d04b68976665b491606f3cad39d742b8f636e0aa0950931f3045c470151b0c603d0491
+  78bd27e2fe5d391e078946f62370833965122dbb66ec95be6d8b1b6a42ff3beff29c5def7aa18e883ef10ad4ee49d3b37d9e8f55534a024bb99c8ab4b80bb815
+  f4bb8075b96c3d7b11fc70a091b0dac2aca5e29405ab04c2fd69d178fcee1a1c94ee3f45e40ad5dffc274b32b4e7be05f2066890f3bbb816989a18fc10e8fe50
+  749bae94b77049b2d1273264ec60354d5437f03ceeaa8c05d6fd2cc9642a4416bab0aea785d6d7012cad8293fc57b2a262f4844ce4dd86c3c968871689f0d4e2
+)
+validpgpkeys=(
+  52DFA7B8BAC74687C8A88EF48165E3D1987E2132 # Arun Raghavan <arun@asymptotic.io>
+)
+
+prepare() {
+  cd pavucontrol
+  git apply -3 ../0001-Suspend-volume-meters-when-unmapped.patch
+  git apply -3 ../0002-Track-X11-frame-visibility-for-volume-meters.patch
+  git apply -3 ../0003-Pause-X11-property-events-while-the-frame-is-hidden.patch
+}
+
+build() {
+  arch-meson pavucontrol build
+  meson compile -C build
+}
+
+check() {
+  meson test -C build --print-errorlogs
+}
+
+package() {
+  meson install -C build --destdir "$pkgdir"
+}
+
+# vim:set sw=2 sts=-1 et:

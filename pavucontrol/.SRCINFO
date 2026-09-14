@@ -1,0 +1,35 @@
+pkgbase = pavucontrol
+	pkgdesc = PulseAudio Volume Control
+	pkgver = 6.2
+	pkgrel = 4
+	epoch = 1
+	url = https://freedesktop.org/software/pulseaudio/pavucontrol/
+	arch = x86_64
+	license = GPL-2.0-or-later
+	checkdepends = tidy
+	makedepends = git
+	makedepends = lynx
+	makedepends = meson
+	depends = glib2
+	depends = glibc
+	depends = glibmm-2.68
+	depends = gtk4
+	depends = gtkmm-4.0
+	depends = json-glib
+	depends = libcanberra
+	depends = libgcc
+	depends = libpulse
+	depends = libsigc++-3.0
+	depends = libstdc++
+	depends = libx11
+	source = git+https://gitlab.freedesktop.org/pulseaudio/pavucontrol.git?signed#tag=v6.2
+	source = 0001-Suspend-volume-meters-when-unmapped.patch
+	source = 0002-Track-X11-frame-visibility-for-volume-meters.patch
+	source = 0003-Pause-X11-property-events-while-the-frame-is-hidden.patch
+	validpgpkeys = 52DFA7B8BAC74687C8A88EF48165E3D1987E2132
+	b2sums = bcedd14881a304580dd7998d62a89d4e1f7f8fcb9d8c6d3cf773df3716d04b68976665b491606f3cad39d742b8f636e0aa0950931f3045c470151b0c603d0491
+	b2sums = cea43476558dc4389f49a60b3ca017a271ef8068aa6b68ada83f28efd2175d79d03886fc8533552e9c07015f34cbf862f28cf06be1f413a92ab3faaab11e7b50
+	b2sums = 4c1d8694b99a511ae8d0a91c7e080e6b64e4de2219ad288a049aa15ee7f0ed1dbedaa1244b11a975144673b1b30d3cdb5295caea363ebabc2f98afaeedcca46b
+	b2sums = 9649a6ef104c2525c43215b4ac5fde2a33c7895d768fbe317272b64a0591d8733bd52d9d4184b627cdc246ffcfbb11e17ce52d834383ca9de7e4db76f043e272
+
+pkgname = pavucontrol

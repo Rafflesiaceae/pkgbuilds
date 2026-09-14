@@ -1,0 +1,343 @@
+From e83f2cd8c1fe2760a076bbcfc74aa7bff03aef79 Mon Sep 17 00:00:00 2001
+From: Codex <codex@localhost>
+Date: Sun, 13 Sep 2026 08:27:01 +0200
+Subject: [PATCH 2/3] Track X11 frame visibility for volume meters
+
+GTK keeps a surface mapped when i3 hides its frame without publishing
+_NET_WM_STATE_HIDDEN, so the generic mapped and suspended properties cannot
+detect hidden workspaces.
+
+Watch map, unmap, and reparent events for the window-manager frame through
+GdkX11Display::xevent and use the client window viewability to control
+peak-monitor streams.
+---
+ meson.build                 |   1 +
+ src/mainwindow.cc           |   7 +-
+ src/mainwindow.h            |   3 +
+ src/meson.build             |   3 +-
+ src/x11visibilitymonitor.cc | 180 ++++++++++++++++++++++++++++++++++++
+ src/x11visibilitymonitor.h  |  36 ++++++++
+ 6 files changed, 228 insertions(+), 2 deletions(-)
+ create mode 100644 src/x11visibilitymonitor.cc
+ create mode 100644 src/x11visibilitymonitor.h
+
+diff --git a/meson.build b/meson.build
+index a05921d..974f186 100644
+--- a/meson.build
++++ b/meson.build
+@@ -18,6 +18,7 @@ have_pulse_messaging_api = cpp.has_function('pa_context_send_message_to_object',
+ )
+
+ json_glib_dep = dependency('json-glib-1.0', required : have_pulse_messaging_api)
++x11_dep = dependency('x11', required : true)
+
+ lynx = find_program('lynx', required: get_option('lynx'))
+ tidy = find_program('tidy', required: false)
+diff --git a/src/mainwindow.cc b/src/mainwindow.cc
+index db49900..3dc2046 100644
+--- a/src/mainwindow.cc
++++ b/src/mainwindow.cc
+@@ -32,6 +32,7 @@
+ #include "sinkinputwidget.h"
+ #include "sourceoutputwidget.h"
+ #include "rolewidget.h"
++#include "x11visibilitymonitor.h"
+
+ #include "i18n.h"
+
+@@ -195,7 +196,8 @@ MainWindow* MainWindow::create(bool maximize) {
+ }
+
+ bool MainWindow::volumeMetersActive() const {
+-    return showVolumeMetersCheckButton->get_active() && get_mapped() && !is_suspended();
++    return showVolumeMetersCheckButton->get_active() && get_mapped() && !is_suspended() &&
++           (!x11VisibilityMonitor || x11VisibilityMonitor->isVisible());
+ }
+
+ void MainWindow::setPeakStreamsCorked(bool corked) {
+@@ -221,6 +223,9 @@ void MainWindow::on_realize() {
+     Gtk::Window::on_realize();
+
+     property_suspended().signal_changed().connect(sigc::mem_fun(*this, &MainWindow::onSuspendedChanged));
++    x11VisibilityMonitor = X11VisibilityMonitor::create(get_surface(), [this]() {
++        setPeakStreamsCorked(!volumeMetersActive());
++    });
+     set_cursor(Gdk::Cursor::create("wait"));
+ }
+
+diff --git a/src/mainwindow.h b/src/mainwindow.h
+index f152a9b..314f901 100644
+--- a/src/mainwindow.h
++++ b/src/mainwindow.h
+@@ -33,6 +33,7 @@ class MainWindow;
+ #include <canberra.h>
+ #endif
+
++#include <memory>
+ #include <unordered_map>
+
+ class CardWidget;
+@@ -41,6 +42,7 @@ class SourceWidget;
+ class SinkInputWidget;
+ class SourceOutputWidget;
+ class RoleWidget;
++class X11VisibilityMonitor;
+
+ class MainWindow : public Gtk::Window {
+ public:
+@@ -136,6 +138,7 @@ private:
+     void setPeakStreamsCorked(bool corked);
+     void onSuspendedChanged();
+
++    std::unique_ptr<X11VisibilityMonitor> x11VisibilityMonitor;
+     gboolean m_connected;
+     gchar* m_config_filename;
+ };
+diff --git a/src/meson.build b/src/meson.build
+index 60b8c6d..defb1b4 100644
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -19,10 +19,11 @@ pavucontrol_sources = [
+   'sourceoutputwidget.cc',
+   'sourcewidget.cc',
+   'streamwidget.cc',
++  'x11visibilitymonitor.cc',
+   resources
+ ]
+
+-pavucontrol_deps = [gtkmm_dep, sigcpp_dep, canberragtk_dep, libpulse_dep, libpulsemlglib_dep]
++pavucontrol_deps = [gtkmm_dep, sigcpp_dep, canberragtk_dep, libpulse_dep, libpulsemlglib_dep, x11_dep]
+ pavucontrol_defines = ['-DHAVE_CONFIG_H']
+
+ if have_pulse_messaging_api
+diff --git a/src/x11visibilitymonitor.cc b/src/x11visibilitymonitor.cc
+new file mode 100644
+index 0000000..41a43b1
+--- /dev/null
++++ b/src/x11visibilitymonitor.cc
+@@ -0,0 +1,180 @@
++/***
++  This file is part of pavucontrol.
++
++  pavucontrol is free software; you can redistribute it and/or modify
++  it under the terms of the GNU General Public License as published by
++  the Free Software Foundation, either version 2 of the License, or
++  (at your option) any later version.
++***/
++
++#include "x11visibilitymonitor.h"
++
++#include <utility>
++
++#include <gdk/x11/gdkx.h>
++#include <gdkmm/display.h>
++
++struct X11VisibilityMonitor::Impl {
++    Impl(const Glib::RefPtr<Gdk::Surface>& surface, std::function<void()> visibilityChanged) :
++        visibilityChanged(std::move(visibilityChanged)) {
++        const auto display = surface->get_display();
++        if (!display || !GDK_IS_X11_SURFACE(surface->gobj()))
++            return;
++
++        gdkDisplay = display->gobj();
++
++        G_GNUC_BEGIN_IGNORE_DEPRECATIONS
++        xdisplay = gdk_x11_display_get_xdisplay(GDK_X11_DISPLAY(gdkDisplay));
++        clientWindow = gdk_x11_surface_get_xid(GDK_X11_SURFACE(surface->gobj()));
++        G_GNUC_END_IGNORE_DEPRECATIONS
++
++        if (!xdisplay || clientWindow == None) {
++            xdisplay = nullptr;
++            return;
++        }
++
++        xeventHandler = g_signal_connect(
++            gdkDisplay, "xevent", G_CALLBACK(onXEvent), this);
++        updateFrameWindow();
++        visible = queryVisible();
++    }
++
++    ~Impl() {
++        if (xeventHandler)
++            g_signal_handler_disconnect(gdkDisplay, xeventHandler);
++
++        restoreFrameEventMask();
++        if (xdisplay)
++            XFlush(xdisplay);
++    }
++
++    bool valid() const {
++        return xdisplay != nullptr;
++    }
++
++    bool isVisible() const {
++        return visible;
++    }
++
++private:
++    static gboolean onXEvent(GdkDisplay *, XEvent *event, gpointer data) {
++        return static_cast<Impl *>(data)->handleXEvent(*event);
++    }
++
++    gboolean handleXEvent(const XEvent& event) {
++        bool visibilityMayHaveChanged = false;
++
++        switch (event.type) {
++            case ReparentNotify:
++                if (event.xreparent.window == clientWindow) {
++                    updateFrameWindow();
++                    visibilityMayHaveChanged = true;
++                }
++                break;
++
++            case MapNotify:
++                visibilityMayHaveChanged =
++                    event.xmap.window == clientWindow || event.xmap.window == frameWindow;
++                break;
++
++            case UnmapNotify:
++                visibilityMayHaveChanged =
++                    event.xunmap.window == clientWindow || event.xunmap.window == frameWindow;
++                break;
++
++            case DestroyNotify:
++                if (event.xdestroywindow.window == frameWindow) {
++                    frameWindow = None;
++                    haveFrameEventMask = false;
++                    updateFrameWindow();
++                    visibilityMayHaveChanged = true;
++                }
++                break;
++        }
++
++        if (visibilityMayHaveChanged)
++            updateVisibility();
++
++        return false;
++    }
++
++    void restoreFrameEventMask() {
++        if (frameWindow != None && haveFrameEventMask)
++            XSelectInput(xdisplay, frameWindow, frameEventMask);
++
++        frameWindow = None;
++        haveFrameEventMask = false;
++    }
++
++    void updateFrameWindow() {
++        Window root = None;
++        Window parent = None;
++        Window *children = nullptr;
++        unsigned int childCount = 0;
++
++        if (!XQueryTree(xdisplay, clientWindow, &root, &parent, &children, &childCount))
++            return;
++
++        if (children)
++            XFree(children);
++
++        if (parent == frameWindow)
++            return;
++
++        restoreFrameEventMask();
++        frameWindow = parent;
++
++        XWindowAttributes attributes;
++        if (frameWindow != None && XGetWindowAttributes(xdisplay, frameWindow, &attributes)) {
++            frameEventMask = attributes.your_event_mask;
++            haveFrameEventMask = true;
++            XSelectInput(xdisplay, frameWindow, frameEventMask | StructureNotifyMask);
++            XFlush(xdisplay);
++        }
++    }
++
++    bool queryVisible() const {
++        XWindowAttributes attributes;
++        return XGetWindowAttributes(xdisplay, clientWindow, &attributes) &&
++               attributes.map_state == IsViewable;
++    }
++
++    void updateVisibility() {
++        const bool newVisible = queryVisible();
++        if (newVisible == visible)
++            return;
++
++        visible = newVisible;
++        visibilityChanged();
++    }
++
++    GdkDisplay *gdkDisplay = nullptr;
++    Display *xdisplay = nullptr;
++    Window clientWindow = None;
++    Window frameWindow = None;
++    long frameEventMask = 0;
++    bool haveFrameEventMask = false;
++    bool visible = false;
++    std::function<void()> visibilityChanged;
++    gulong xeventHandler = 0;
++};
++
++std::unique_ptr<X11VisibilityMonitor> X11VisibilityMonitor::create(
++        const Glib::RefPtr<Gdk::Surface>& surface,
++        std::function<void()> visibilityChanged) {
++    auto impl = std::make_unique<Impl>(surface, std::move(visibilityChanged));
++    if (!impl->valid())
++        return nullptr;
++
++    return std::unique_ptr<X11VisibilityMonitor>(new X11VisibilityMonitor(std::move(impl)));
++}
++
++X11VisibilityMonitor::X11VisibilityMonitor(std::unique_ptr<Impl> impl) :
++    impl(std::move(impl)) {
++}
++
++X11VisibilityMonitor::~X11VisibilityMonitor() = default;
++
++bool X11VisibilityMonitor::isVisible() const {
++    return impl->isVisible();
++}
+diff --git a/src/x11visibilitymonitor.h b/src/x11visibilitymonitor.h
+new file mode 100644
+index 0000000..9af603a
+--- /dev/null
++++ b/src/x11visibilitymonitor.h
+@@ -0,0 +1,36 @@
++/***
++  This file is part of pavucontrol.
++
++  pavucontrol is free software; you can redistribute it and/or modify
++  it under the terms of the GNU General Public License as published by
++  the Free Software Foundation, either version 2 of the License, or
++  (at your option) any later version.
++***/
++
++#ifndef x11visibilitymonitor_h
++#define x11visibilitymonitor_h
++
++#include <functional>
++#include <memory>
++
++#include <gdkmm/surface.h>
++
++class X11VisibilityMonitor {
++public:
++    static std::unique_ptr<X11VisibilityMonitor> create(
++        const Glib::RefPtr<Gdk::Surface>& surface,
++        std::function<void()> visibilityChanged);
++
++    ~X11VisibilityMonitor();
++
++    bool isVisible() const;
++
++private:
++    struct Impl;
++
++    explicit X11VisibilityMonitor(std::unique_ptr<Impl> impl);
++
++    std::unique_ptr<Impl> impl;
++};
++
++#endif
+--
+2.55.0
+
