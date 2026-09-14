@@ -1,16 +1,54 @@
 #!/usr/bin/env nu
 # Build lazy-user-session-bus as a .deb on Ubuntu 24.04.
 # Run from the lazy-user-session-bus/ directory where the compiled binary lives.
-# Usage: nu ubuntu24.nu [--install]
+# Usage: nu ubuntu24.nu [--check | --force] [--install]
 
 use ../.nupkg.ubuntu.nu *
 
 const PKG_NAME = "lazy-user-session-bus"
 const PKG_VER  = "1-1"
 
+# Print a version status report and exit.
+# There is no upstream URL to check — this is a locally compiled binary.
+def do-check [] {
+    let installed = (dpkg-version $PKG_NAME)
+    let installed_str = if $installed == null { "(not installed)" } else { $installed }
+
+    print $"Package:      ($PKG_NAME)"
+    print $"Installed:    ($installed_str)"
+    print $"Builds:       ($PKG_VER)"
+    print $"Upstream:     N/A (local binary, no public upstream)"
+
+    if $installed == null or $installed != $PKG_VER {
+        print "Status:       NEEDS BUILD"
+        exit 1
+    }
+    print "Status:       UP TO DATE"
+}
+
 def main [
     --install (-i)  # Install the produced .deb after building
+    --check   (-c)  # Report version status without building; exits 0 (ok) or 1 (action needed)
+    --force   (-f)  # Skip up-to-date check and always rebuild
 ] {
+    if $check and $force {
+        fail "--check and --force are mutually exclusive"
+    }
+
+    if $check {
+        do-check
+        return
+    }
+
+    # Without --force, skip the build when the installed package is already current.
+    if not $force {
+        let installed = (dpkg-version $PKG_NAME)
+        if $installed != null and $installed == $PKG_VER {
+            print $"($PKG_NAME) ($PKG_VER) is already installed. Use --force to rebuild."
+            return
+        }
+    }
+
     let start_dir = (pwd)
     let build_dir = ($start_dir | path join $"($PKG_NAME)-deb")
     let final_deb = ($start_dir | path join $"($PKG_NAME)_($PKG_VER)_all.deb")

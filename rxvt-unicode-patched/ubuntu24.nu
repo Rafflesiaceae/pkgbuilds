@@ -1,13 +1,16 @@
 #!/usr/bin/env nu
 # Build rxvt-unicode 9.30 with custom patches as a .deb on Ubuntu 24.04.
 # Run from the rxvt-unicode-patched/ directory (where the patch files live).
-# Usage: nu ubuntu24.nu [--install]
+# Usage: nu ubuntu24.nu [--check | --force] [--install]
 
 use ../.nupkg.ubuntu.nu *
 
 const VERSION = "9.30"
 const PKG_NAME = "rxvt-unicode-patched"
 const SOURCE_URL = $"http://dist.schmorp.de/rxvt-unicode/Attic/rxvt-unicode-($VERSION).tar.bz2"
+
+# checkinstall formats the dpkg version as pkgversion-pkgrelease.
+const WOULD_BUILD = "9.30-1"
 
 # Ordered list of patches to apply; missing files are skipped with a warning.
 const PATCHES = [
@@ -20,9 +23,48 @@ const PATCHES = [
     "rxvt-unicode-0001-Prefer-XDG_RUNTIME_DIR-over-the-HOME.patch"
 ]
 
+# Print a version status report and exit.
+# Upstream check is skipped: rxvt-unicode is effectively unmaintained
+# (last official release 9.22 in 2016; we track the patched 9.30 from Attic).
+def do-check [] {
+    let installed = (dpkg-version $PKG_NAME)
+    let installed_str = if $installed == null { "(not installed)" } else { $installed }
+
+    print $"Package:      ($PKG_NAME)"
+    print $"Installed:    ($installed_str)"
+    print $"Builds:       ($WOULD_BUILD)"
+    print $"Upstream:     N/A (unmaintained; last official release 9.22)"
+
+    if $installed == null or $installed != $WOULD_BUILD {
+        print "Status:       NEEDS BUILD"
+        exit 1
+    }
+    print "Status:       UP TO DATE"
+}
+
 def main [
     --install (-i)  # Install the produced .deb after building
+    --check   (-c)  # Report version status without building; exits 0 (ok) or 1 (action needed)
+    --force   (-f)  # Skip up-to-date check and always rebuild
 ] {
+    if $check and $force {
+        fail "--check and --force are mutually exclusive"
+    }
+
+    if $check {
+        do-check
+        return
+    }
+
+    # Without --force, skip the build when the installed package is already current.
+    if not $force {
+        let installed = (dpkg-version $PKG_NAME)
+        if $installed != null and $installed == $WOULD_BUILD {
+            print $"($PKG_NAME) ($WOULD_BUILD) is already installed. Use --force to rebuild."
+            return
+        }
+    }
+
     # Resolve absolute paths before any cd so they stay valid throughout.
     let start_dir = (pwd)
     let build_dir = ($start_dir | path join "build-urxvt")

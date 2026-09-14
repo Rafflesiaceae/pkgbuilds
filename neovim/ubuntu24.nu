@@ -1,18 +1,115 @@
 #!/usr/bin/env nu
 # Repack an upstream Neovim release tarball as a native .deb on Ubuntu 24.04.
-# The tarball URL is passed as a positional argument (usually a GitHub release).
-# Usage: nu ubuntu24.nu <tarball-url> [--install] [--skip-apt]
+# Usage: nu ubuntu24.nu [<tarball-url>] [--check | --force] [--install] [--skip-apt]
+#
+# --check without a URL still queries GitHub for the latest release and reports
+# what is currently installed.
 
 use ../.nupkg.ubuntu.nu *
 
+const PKG_NAME = "neovim"
 # Fallback runtime deps when dpkg-shlibdeps cannot resolve the shared libraries.
 const FALLBACK_DEPS = "libc6, libgcc-s1, libstdc++6, libuv1t64, libvterm0, libluajit-5.1-2"
 
+# Extract the Neovim version string from a GitHub release tarball URL.
+# Returns null when no vX.Y.Z pattern is found.
+def version-from-url [url: string] {
+    let m = ($url | parse --regex '.*/v(?P<v>[0-9]+\.[0-9]+\.[0-9]+)')
+    if ($m | is-empty) { null } else { $m.v.0 }
+}
+
+# Fetch the latest Neovim release tag from the GitHub API.
+# Returns null on network error or unexpected JSON shape.
+def github-latest [] {
+    let result = (do {
+        ^curl -fsSL "https://api.github.com/repos/neovim/neovim/releases/latest"
+    } | complete)
+    if $result.exit_code != 0 { return null }
+    try {
+        $result.stdout | from json | get tag_name | str replace "v" ""
+    } catch {
+        null
+    }
+}
+
+# Print a version status report and exit.
+# Checks the installed package, what a given URL would produce, and GitHub latest.
+def do-check [url?: string] {
+    let installed = (dpkg-version $PKG_NAME)
+    let installed_str = if $installed == null { "(not installed)" } else { $installed }
+
+    let url_version = if $url != null { version-from-url $url } else { null }
+    let would_build = if $url_version != null { $"($url_version)-1" } else { null }
+    let would_build_str = if $would_build != null { $would_build } else { "(no URL given)" }
+
+    print $"Package:      ($PKG_NAME)"
+    print $"Installed:    ($installed_str)"
+    print $"Builds:       ($would_build_str)"
+
+    # Always query GitHub so the user knows if there is a newer release.
+    print "              (fetching GitHub latest...)"
+    let upstream = (github-latest)
+    let upstream_str = if $upstream != null {
+        $"($upstream) (github.com/neovim/neovim/releases)"
+    } else {
+        "(could not fetch)"
+    }
+    print $"Upstream:     ($upstream_str)"
+
+    # Determine whether any action is needed.
+    let needs_build = $would_build != null and ($installed == null or $installed != $would_build)
+    let newer_upstream = $upstream != null and $would_build != null and $upstream > $url_version
+    let no_url_installed = $url == null and $installed == null
+
+    if $needs_build {
+        print "Status:       NEEDS BUILD"
+        exit 1
+    }
+    if $newer_upstream {
+        print "Status:       NEWER UPSTREAM AVAILABLE"
+        exit 1
+    }
+    if $no_url_installed {
+        print "Status:       NOT INSTALLED"
+        exit 1
+    }
+    print "Status:       UP TO DATE"
+}
+
 def main [
-    url: string             # URL to the Neovim upstream tarball (.tar.gz or .tar.xz)
-    --install (-i)          # Install the produced .deb after building
+    url?: string            # URL to the Neovim upstream tarball (.tar.gz or .tar.xz)
+    --install  (-i)         # Install the produced .deb after building
+    --check    (-c)         # Report version status without building; exits 0 (ok) or 1 (action needed)
+    --force    (-f)         # Skip up-to-date check and always rebuild
     --skip-apt              # Skip the apt-get install of build prerequisites
 ] {
+    if $check and $force {
+        fail "--check and --force are mutually exclusive"
+    }
+
+    if $check {
+        do-check $url
+        return
+    }
+
+    # URL is required for building.
+    if $url == null {
+        fail "A tarball URL is required. Usage: nu ubuntu24.nu <url> [--install]"
+    }
+
+    # Without --force, skip the build when the installed package is already current.
+    if not $force {
+        let url_version = (version-from-url $url)
+        if $url_version != null {
+            let would_build = $"($url_version)-1"
+            let installed = (dpkg-version $PKG_NAME)
+            if $installed != null and $installed == $would_build {
+                print $"($PKG_NAME) ($would_build) is already installed. Use --force to rebuild."
+                return
+            }
+        }
+    }
+
     let pkgname   = (try { $env.PKGNAME   } catch { "neovim" })
     let revision  = (try { $env.REVISION  } catch { "1" })
     let arch      = (try { $env.ARCH      } catch { capture ["dpkg", "--print-architecture"] })
@@ -70,9 +167,9 @@ def main [
 
     # Determine version: prefer URL-embedded vX.Y.Z, then ask nvim itself.
     let version = (try { $env.VERSION } catch {
-        let url_match = ($url | parse --regex '.*/v(?P<v>[0-9]+\.[0-9]+\.[0-9]+)')
-        if not ($url_match | is-empty) {
-            $url_match.v.0
+        let url_ver = (version-from-url $url)
+        if $url_ver != null {
+            $url_ver
         } else {
             # Run nvim with its own lib dir on LD_LIBRARY_PATH to avoid link errors.
             let nvim_out = (do {

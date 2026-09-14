@@ -1,7 +1,7 @@
 #!/usr/bin/env nu
 # Build and optionally install xkeyboard-config-desc as a .deb on Ubuntu 24.04.
 # Run from the xkeyboard-config-desc/ directory where the `desc` symbol file lives.
-# Usage: nu ubuntu24.nu [--install]
+# Usage: nu ubuntu24.nu [--check | --force] [--install]
 
 use ../.nupkg.ubuntu.nu *
 
@@ -64,10 +64,56 @@ if layout_list is not None:
 fi
 '
 
+# Compute the package version from the SHA-256 of the `desc` file.
+# Returns null when desc is not found (wrong directory).
+def compute-version [start_dir: string] {
+    let desc_path = ($start_dir | path join "desc")
+    if not ($desc_path | path exists) { return null }
+    let raw_hash = (capture ["sha256sum", $desc_path] | split row " " | first | str substring 0..<8)
+    $"0~($raw_hash)"
+}
+
+# Print a version status report and exit.
+# Version is content-addressed via SHA-256 of the `desc` symbol file,
+# so there is no separate upstream to check.
+def do-check [start_dir: string] {
+    let installed = (dpkg-version $PKG_NAME)
+    let installed_str = if $installed == null { "(not installed)" } else { $installed }
+
+    let would_build = (compute-version $start_dir)
+    let would_build_str = if $would_build == null {
+        "(desc not found — run from xkeyboard-config-desc/ directory)"
+    } else {
+        $would_build
+    }
+
+    print $"Package:      ($PKG_NAME)"
+    print $"Installed:    ($installed_str)"
+    print $"Builds:       ($would_build_str)"
+    print $"Upstream:     N/A (version is SHA-256 of the local desc file)"
+
+    if $would_build == null or $installed == null or $installed != $would_build {
+        print "Status:       NEEDS BUILD"
+        exit 1
+    }
+    print "Status:       UP TO DATE"
+}
+
 def main [
     --install (-i)  # Install the produced .deb after building
+    --check   (-c)  # Report version status without building; exits 0 (ok) or 1 (action needed)
+    --force   (-f)  # Skip up-to-date check and always rebuild
 ] {
+    if $check and $force {
+        fail "--check and --force are mutually exclusive"
+    }
+
     let start_dir = (pwd)
+
+    if $check {
+        do-check $start_dir
+        return
+    }
 
     # Version is derived from the first 8 hex chars of the symbol file's SHA-256
     # so the package version automatically tracks content changes.
@@ -75,8 +121,17 @@ def main [
     if not ($desc_path | path exists) {
         fail $"Source file 'desc' not found in ($start_dir)"
     }
-    let raw_hash = (capture ["sha256sum", $desc_path] | split row " " | first | str substring 0..<8)
-    let pkg_ver  = $"0~($raw_hash)"
+
+    let pkg_ver = (compute-version $start_dir)
+
+    # Without --force, skip the build when the installed package is already current.
+    if not $force {
+        let installed = (dpkg-version $PKG_NAME)
+        if $installed != null and $installed == $pkg_ver {
+            print $"($PKG_NAME) ($pkg_ver) is already installed. Use --force to rebuild."
+            return
+        }
+    }
 
     let build_dir = ($start_dir | path join $"($PKG_NAME)-deb")
     let final_deb = ($start_dir | path join $"($PKG_NAME)_($pkg_ver)_all.deb")

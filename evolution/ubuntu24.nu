@@ -237,9 +237,93 @@ def verify-no-usr-local [out_dir: string] {
     }
 }
 
+# Fetch the latest patch release in the current GNOME Evolution series from the
+# GNOME download server.  Returns null on network error or parse failure.
+def gnome-evolution-latest [] {
+    # Derive the major.minor series directory from the hardcoded upstream version.
+    let series = ($UPSTREAM_VERSION | split row "." | first 2 | str join ".")
+    let result = (do {
+        ^curl -fsSL $"https://download.gnome.org/sources/evolution/($series)/"
+    } | complete)
+    if $result.exit_code != 0 { return null }
+
+    # Directory listings contain hrefs like:  evolution-3.60.X.tar.xz
+    # Escape the dots in the series string so they match literally in the regex.
+    let series_re = ($series | str replace --all "." "\\.")
+    let pattern = $"evolution-(?P<ver>($series_re)\\.[0-9]+)\\.tar\\.xz"
+    let versions = (
+        $result.stdout
+        | lines
+        | each {|l|
+            let m = ($l | parse --regex $pattern)
+            if ($m | is-empty) { null } else { $m.ver.0 }
+        }
+        | where {|v| $v != null}
+        | sort
+        | reverse
+    )
+    if ($versions | is-empty) { null } else { $versions | first }
+}
+
+# Print a version status report for all three Evolution components and exit.
+# Checks the installed `evolution` package against LOCAL_VERSION and queries
+# the GNOME download server for newer patch releases in the wrapped series.
+def do-check [] {
+    let installed = (dpkg-version "evolution")
+    let installed_str = if $installed == null { "(not installed)" } else { $installed }
+
+    print $"Package:      evolution (+ evolution-data-server, evolution-ews)"
+    print $"Installed:    ($installed_str)"
+    print $"Builds:       ($LOCAL_VERSION)"
+
+    print "              (fetching GNOME latest...)"
+    let upstream = (gnome-evolution-latest)
+    let upstream_str = if $upstream != null {
+        $"($upstream) (download.gnome.org/sources/evolution)"
+    } else {
+        "(could not fetch)"
+    }
+    print $"Upstream:     ($upstream_str)"
+
+    let needs_build = $installed == null or $installed != $LOCAL_VERSION
+    # A newer upstream exists when the server reports a version beyond what the
+    # script currently wraps, signalling that the script itself needs updating.
+    let newer_upstream = $upstream != null and $upstream != $UPSTREAM_VERSION
+
+    if $needs_build {
+        print "Status:       NEEDS BUILD"
+        exit 1
+    }
+    if $newer_upstream {
+        print $"Status:       NEWER UPSTREAM AVAILABLE (($upstream) vs script wraps ($UPSTREAM_VERSION))"
+        exit 1
+    }
+    print "Status:       UP TO DATE"
+}
+
 def main [
     --install (-i)  # Accepted for interface consistency; Evolution always installs during build
+    --check   (-c)  # Report version status without building; exits 0 (ok) or 1 (action needed)
+    --force   (-f)  # Skip up-to-date check and always rebuild
 ] {
+    if $check and $force {
+        fail "--check and --force are mutually exclusive"
+    }
+
+    if $check {
+        do-check
+        return
+    }
+
+    # Without --force, skip the long multi-hour build when the package is current.
+    if not $force {
+        let installed = (dpkg-version "evolution")
+        if $installed != null and $installed == $LOCAL_VERSION {
+            print $"Evolution ($LOCAL_VERSION) is already installed. Use --force to rebuild."
+            return
+        }
+    }
+
     assert-ubuntu-24
 
     $env.DEBFULLNAME = "Local Evolution Builder"
