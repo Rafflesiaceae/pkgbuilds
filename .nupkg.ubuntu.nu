@@ -96,6 +96,12 @@ export def assert-ubuntu-24 [] {
     }
 }
 
+# Return the installed Debian package version string, or null when not installed.
+export def dpkg-version [pkg: string] {
+    let result = (do { ^dpkg-query -W -f='${Version}' $pkg } | complete)
+    if $result.exit_code == 0 { $result.stdout | str trim } else { null }
+}
+
 # Install a list of .deb files via `sudo apt-get install`; skips -dbgsym packages.
 export def apt-install-debs [debs: list<string>] {
     # Debug-symbol packages are large and rarely needed on the build host.
