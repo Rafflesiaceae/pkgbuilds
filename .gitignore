@@ -5,3 +5,4 @@
 **/*.pkg.tar.zst
 **/*.tar.gz
 **/*.war
+**/*.zip
