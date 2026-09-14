@@ -295,7 +295,7 @@ def do-check [] {
         exit 1
     }
     if $newer_upstream {
-        print $"Status:       NEWER UPSTREAM AVAILABLE (($upstream) vs script wraps ($UPSTREAM_VERSION))"
+        print $"Status:       NEWER UPSTREAM AVAILABLE - ($upstream) vs script wraps ($UPSTREAM_VERSION)"
         exit 1
     }
     print "Status:       UP TO DATE"
