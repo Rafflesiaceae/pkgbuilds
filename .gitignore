@@ -10,6 +10,7 @@ wip
 
 install-list*
 
+*deb-build*/
 build-*/
 makerpm-*/
 

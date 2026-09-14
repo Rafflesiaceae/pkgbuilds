@@ -305,7 +305,7 @@ class Installer:
         self.stats.processed += 1
 
     def process_ubuntu24(self, entry: str) -> None:
-        """Run <entry>/ubuntu24.nu --install for an Ubuntu 24.x system."""
+        """Run <entry>/ubuntu24.py --install for an Ubuntu 24.x system."""
         heading(f"==> UBUNTU24: {entry}")
         directory = PKGBUILD_ROOT / entry
 
@@ -313,23 +313,23 @@ class Installer:
             self.fail(f"Directory does not exist: {directory}")
             return
 
-        script = directory / "ubuntu24.nu"
+        script = directory / "ubuntu24.py"
         if not script.is_file():
-            # Treat packages without an ubuntu24.nu as unchecked/unsupported.
-            print(f"==> No ubuntu24.nu found in {entry}; skipping.")
+            # Treat packages without an ubuntu24.py as unchecked/unsupported.
+            print(f"==> No ubuntu24.py found in {entry}; skipping.")
             self.stats.unchecked += 1
             return
 
         if self.check_only:
             # In check mode we cannot run the script; just flag as unchecked.
-            print("==> UNCHECKED: ubuntu24.nu present but check mode is not supported")
+            print("==> UNCHECKED: ubuntu24.py present but check mode is not supported")
             self.stats.unchecked += 1
             return
 
-        print(f"==> Running ubuntu24.nu --install for {entry}...")
-        result = command(["nu", script, "--install"], cwd=directory)
+        print(f"==> Running ubuntu24.py --install for {entry}...")
+        result = command(["python", script, "--install"], cwd=directory)
         if result.returncode != 0:
-            self.fail(f"ubuntu24.nu failed for {entry}")
+            self.fail(f"ubuntu24.py failed for {entry}")
             return
 
         self.stats.processed += 1
@@ -551,7 +551,7 @@ class Installer:
         return self._run_arch()
 
     def _run_ubuntu24(self) -> int:
-        """Process all install-list entries via their ubuntu24.nu scripts."""
+        """Process all install-list entries via their ubuntu24.py scripts."""
         for entry in read_package_list(INSTALL_LIST):
             if not valid_entry(entry):
                 self.fail(f"Invalid install-list entry: {entry}")
@@ -644,6 +644,7 @@ class Installer:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "-c",
         "--check",
         action="store_true",
         help="check for updates without building or installing packages",
