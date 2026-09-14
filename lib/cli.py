@@ -13,6 +13,13 @@ Every script defines three callbacks and hands them to run():
 
 run() wires these together with the shared -i/-c/-f flags, handles the
 --check/--force mutual exclusion, and reports BuildError as `error: ...`.
+
+Exit codes for the default (non --check) flow are deliberately distinct so
+callers such as install.py can tell a no-op apart from an actual rebuild
+without re-running the check themselves:
+  0  built (or rebuilt) successfully
+  1  the build raised BuildError
+  2  skipped -- check_up_to_date() reported the package is already current
 """
 
 from __future__ import annotations
@@ -51,7 +58,7 @@ def run(
         message = check_up_to_date(args)
         if message:
             print(message)
-            return 0
+            return 2
 
     try:
         build(args)

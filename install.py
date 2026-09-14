@@ -44,6 +44,10 @@ class Stats:
     outdated: int = 0
     unchecked: int = 0
     failed: int = 0
+    # Only used by the Ubuntu 24.x install flow, which distinguishes a no-op
+    # check from an actual rebuild (see lib/cli.py's run() exit codes).
+    up_to_date: int = 0
+    rebuilt: int = 0
 
 
 def heading(label: str) -> None:
@@ -305,7 +309,13 @@ class Installer:
         self.stats.processed += 1
 
     def process_ubuntu24(self, entry: str) -> None:
-        """Run <entry>/ubuntu24.py --install for an Ubuntu 24.x system."""
+        """Check, then (if needed) install <entry>/ubuntu24.py for an
+        Ubuntu 24.x system.
+
+        In the non-check-only flow, ubuntu24.py's own --install already runs
+        check_up_to_date() first and reports which branch it took via exit
+        code (see lib/cli.py), so we don't need a separate --check pass here.
+        """
         heading(f"==> UBUNTU24: {entry}")
         directory = PKGBUILD_ROOT / entry
 
@@ -338,7 +348,13 @@ class Installer:
 
         print(f"==> Running ubuntu24.py --install for {entry}...")
         result = command(["python", script, "--install"], cwd=directory)
-        if result.returncode != 0:
+        # Exit code 2 means check_up_to_date() skipped the build (already
+        # current); 0 means it actually built/installed; anything else failed.
+        if result.returncode == 2:
+            self.stats.up_to_date += 1
+        elif result.returncode == 0:
+            self.stats.rebuilt += 1
+        else:
             self.fail(f"ubuntu24.py failed for {entry}")
             return
 
@@ -580,9 +596,11 @@ class Installer:
 
         print()
         print(SEPARATOR)
-        print(f"Processed: {self.stats.processed}")
-        print(f"Skipped:   {self.stats.unchecked}")
-        print(f"Failed:    {self.stats.failed}")
+        print(f"Processed:  {self.stats.processed}")
+        print(f"Up to date: {self.stats.up_to_date}")
+        print(f"Rebuilt:    {self.stats.rebuilt}")
+        print(f"Skipped:    {self.stats.unchecked}")
+        print(f"Failed:     {self.stats.failed}")
         print(SEPARATOR)
         return 1 if self.stats.failed else 0
 
