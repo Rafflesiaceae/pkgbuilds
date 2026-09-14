@@ -24,7 +24,10 @@ xkb_symbols "basic" {
     key <AD12>	{ [      plus,   asterisk,   asciitilde,  macron ]	};
 
     key <AC02>  { [         s,          S,                U017F,     U1E9E    ] };
-    key <AC07>  { [         j,          J,        dead_belowdot, dead_abovedot   ] };
+    key <AC06>  { [         h,          H,            leftarrow,     U019D    ] };
+    key <AC07>  { [         j,          J,            downarrow, dead_abovedot   ] };
+    key <AC08>  { [         k,          K,              uparrow, dead_belowcomma ] };
+    key <AC09>  { [         l,          L,           rightarrow, Lstroke         ] };
     key <AC10>	{ [odiaeresis, Odiaeresis, dead_doubleacute, dead_belowdot ] };
     key <AC11>	{ [adiaeresis, Adiaeresis, dead_circumflex, dead_caron ] };
     key <TLDE>	{ [dead_circumflex, degree,	U2032,    U2033	] };
