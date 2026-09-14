@@ -1,0 +1,32 @@
+# Maintainer: Rafflesiaceae <rafflesiaceae.plant@gmail.com>
+
+_pkgname=ensureconda
+pkgname=python-ensureconda
+pkgver=1.4.3
+pkgrel=1
+pkgdesc='Simple installer for conda (and conda-likes)'
+arch=('any')
+url='https://github.com/conda-incubator/ensureconda'
+license=('MIT')
+depends=('python-appdirs' 'python-click' 'python-filelock' 'python-requests')
+makedepends=('git' 'python-build' 'python-hatchling' 'python-hatch-vcs' 'python-pip')
+source=("git+https://github.com/conda-incubator/ensureconda.git#tag=v${pkgver}")
+sha512sums=(SKIP)
+
+
+build() {
+  cd $_pkgname
+  python -m build
+}
+
+check() {
+  cd $_pkgname
+  ls dist
+}
+
+package() {
+  cd $_pkgname
+  pip install --no-deps --compile --root="$pkgdir" "./dist/$_pkgname-${pkgver}-py3-none-any.whl"
+}
+
+# vim:set ts=2 sw=2 et:

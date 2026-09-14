@@ -1,0 +1,49 @@
+# Maintainer: Rafflesiaceae <rafflesiaceae.plant@gmail.com>
+
+_pkgname=conda_lock
+pkgname=conda-lock
+pkgver=1.1.1
+pkgrel=1
+pkgdesc='Lightweight lockfile for conda environments'
+arch=('any')
+url='https://conda-incubator.github.io/conda-lock/'
+license=('MIT')
+depends=(
+    'python-pyaml'
+    'python-requests'
+    'python-jinja'
+    'python-toml'
+    'python-ensureconda'
+    'python-click'
+    'python-click-default-group'
+    'python-pydantic'
+    'python-poetry'
+    'python-ruamel-yaml'
+    'python-typing_extensions'
+)
+makedepends=(
+    'python-build'
+    'python-importlib-metadata'
+    'python-wheel'
+    'twine'
+)
+source=("git+https://github.com/conda-incubator/conda-lock.git#tag=v${pkgver}")
+sha512sums=(SKIP)
+
+
+build() {
+  cd $pkgname
+  python -m build
+}
+
+check() {
+  cd $pkgname
+  python -m twine check dist/*
+}
+
+package() {
+  cd $pkgname
+  pip install --no-deps --compile --root="$pkgdir" "./dist/${_pkgname}-${pkgver}-py3-none-any.whl"
+}
+
+# vim:set ts=2 sw=2 et:
