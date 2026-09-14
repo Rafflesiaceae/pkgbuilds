@@ -1,0 +1,17 @@
+# Maintainer: Rafflesiaceae <rafflesiaceae.plant@gmail.com>
+
+pkgname=lazy-user-session-bus
+pkgver=1
+pkgrel=1
+pkgdesc="Send events to users session from anywhere, made while lazy"
+arch=('any')
+license=('GPL')
+depends=('dash')
+source=(lazy-user-session-bus)
+sha1sums=('SKIP')
+
+package() {
+    install -Dm 775 lazy-user-session-bus "${pkgdir}"/usr/bin/lazy-user-session-bus
+}
+
+# vim:set ft=sh syn=sh ts=4 sw=4 et:

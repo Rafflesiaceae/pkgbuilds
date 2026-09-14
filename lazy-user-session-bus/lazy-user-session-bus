@@ -1,0 +1,110 @@
+#!/usr/bin/env dash
+# lazy-user-session-bus v0.1 (2023-04-26) (4d3f8573e134095)
+#
+# Because I'd like to have 'udev' et. al. cause stuff in my desktop user
+# session and this is what I've cooked up.
+#
+#
+# Put this in your ~/.xprofile ↓
+#   ...
+#   lazy-user-session-bus init
+#   lazy-user-session-bus send hello
+#   ...
+#
+# And then put this in your ~/.lazy-user-session-bus ↓
+#   #!/bin/sh
+#   echo "> $1"
+#   case "$1" in
+#       hello)
+#           notify-send "lazy-user-session-bus" "Says hello 🖤"
+#           ;;
+#       *)
+#           echo "unknown: $*"
+#           ;;
+#   esac
+#
+# Then restart and also try ↓
+#   $ sudo lazy-user-session-bus send-all hello
+#
+# REQUIRES: dash cat mktemp mkfifo nohup timeout
+set -e
+die() {
+    printf '%b\n' "$1" >&2
+    exit "${2:-1}"
+}
+
+setup_send_tmpfile() {
+    tmpfile=$(mktemp)
+    cleanup_tmpfile() { rm -f "$tmpfile"; }
+    trap 'cleanup_tmpfile' EXIT INT
+    echo "$@" > "$tmpfile"
+}
+
+case "$1" in
+    send)
+        shift
+
+        pipe="/run/user/$(id -u)/lazy-user-session-bus"
+
+        setup_send_tmpfile "$@"
+
+        timeout 1 dash -c "cat '${tmpfile}' >'${pipe}'"
+        ;;
+    send-all)
+        shift
+
+        [ "$(id -u)" = "0" ] || die "run as root"
+
+        setup_send_tmpfile "$@"
+
+        for user_dir in "/run/user/"* ; do
+            pipe="${user_dir}/lazy-user-session-bus"
+            if [ -p "$pipe" ]; then
+                timeout 1 dash -c "cat '${tmpfile}' >'${pipe}'" || true
+            fi
+        done
+        ;;
+    init)
+        pipe="/run/user/$(id -u)/lazy-user-session-bus"
+        mkfifo "$pipe"
+
+        nohup "$0" receive --skip-creation >>"/tmp/lazy-user-session-bus.$(id -u).log" 2>&1 &
+        ;;
+    receive)
+        shift
+
+        pipe="/run/user/$(id -u)/lazy-user-session-bus"
+
+        if [ "$1" != "--skip-creation" ]; then
+            if [ -e "$pipe" ]; then
+                die "pipe already exists: '${pipe}'"
+            fi
+
+            mkfifo "$pipe"
+        fi
+
+        cleanup_tmpfile() { rm -f "$pipe"; }
+        trap 'cleanup_tmpfile' EXIT INT
+
+        bus_file="${HOME}/.lazy-user-session-bus"
+        if [ ! -e "$bus_file" ]; then
+            die "user has no bus_file at: '$bus_file'"
+        fi
+
+        while true; do
+            if [ ! -p "$pipe" ] || [ ! -e "$pipe" ]; then
+                die "pipe disappeared: '${pipe}'"
+            fi
+            if read -r line <"$pipe"; then
+                set - "$line"
+
+                # shellcheck disable=SC1090
+                ( . "$bus_file" ) || true
+            fi
+        done
+        ;;
+    *)
+        die "usage: send ... | send-all ... | init | receive"
+        ;;
+esac
+
