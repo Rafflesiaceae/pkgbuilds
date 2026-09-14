@@ -2,3 +2,4 @@
 **/src
 **/trunk
 **/*.pkg.tar
+**/*.pkg.tar.zst
