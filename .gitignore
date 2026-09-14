@@ -2,8 +2,10 @@ wip
 **/pkg
 **/src
 **/trunk
-**/*.pkg.tar
-**/*.pkg.tar.zst
-**/*.tar.gz
+**/*.tar*
 **/*.war
 **/*.zip
+**/*.backup
+**/*.rpm
+
+install-list*
