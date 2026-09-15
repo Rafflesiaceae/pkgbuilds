@@ -229,24 +229,28 @@ class StatusBoard:
 
     Worker threads never touch the real terminal directly -- they buffer
     output in a Task and only report a short status label here. When
-    attached to a terminal, active tasks are rendered as an animated
-    in-place spinner list; finished tasks are printed as a single line
-    above that list. When not attached to a terminal (piped/redirected
-    output), the spinner is skipped and only start/finish lines are
-    printed, so logs stay clean.
+    attached to a terminal, active tasks are summarized on a single
+    trailing spinner line; finished tasks are printed as a normal line
+    that scrolls up, after which the spinner line is redrawn below it.
+    When not attached to a terminal (piped/redirected output), the
+    spinner is skipped and only start/finish lines are printed.
+
+    Deliberately a *single* status line rather than one line per task:
+    an earlier version moved the cursor up over a multi-line block with
+    `\\033[nA` and redrew it in place, which relies on the previously
+    drawn block still being exactly N rows above the cursor. The first
+    time the block grows (typically right at startup, when the shell
+    prompt already sits near the bottom of the terminal) that growth can
+    trigger a scroll, which shifts everything up a row and desyncs that
+    cursor-relative math -- seen as flicker, worst right at the start.
+    A single line never needs multi-row movement (just `\\r` within the
+    current line), so it can't hit that failure mode at all.
 
     Any task still running after VERBOSE_AFTER_SECONDS is "promoted": its
     buffered output (so far, and from then on) is streamed live -- prefixed
-    with its label -- instead of staying hidden behind a one-line status,
-    so a genuinely slow/stuck step is visible instead of looking identical
-    to a fast one.
-
-    The steady-state per-tick redraw updates each spinner line in place
-    (write new text, then erase any leftover trailing characters) rather
-    than blanking the whole block and rewriting it. Erase-then-redraw
-    leaves a visible blank frame on terminals that don't coalesce the two
-    into one screen update (observed as flicker on rxvt-unicode); write-
-    then-trim never shows a blank frame since the line always has content.
+    with its label -- instead of staying hidden behind the status line, so
+    a genuinely slow/stuck step is visible instead of looking identical to
+    a fast one.
     """
 
     FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
@@ -257,9 +261,8 @@ class StatusBoard:
         self._lock = threading.Lock()
         self._order: list[str] = []
         self._tasks: dict[str, "Task"] = {}
-        self._started: dict[str, float] = {}
         self._frame = 0
-        self._drawn_lines = 0
+        self._line_drawn = False
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -279,7 +282,7 @@ class StatusBoard:
         self._stop.set()
         self._thread.join()
         with self._lock:
-            out = self._clear_sequence()
+            out = self._clear_line()
             if self.enabled:
                 out += "\033[?25h"
             if out:
@@ -290,7 +293,6 @@ class StatusBoard:
         with self._lock:
             self._order.append(key)
             self._tasks[key] = task
-            self._started[key] = time.monotonic()
             if not self.enabled:
                 sys.stdout.write(f"{DIM}==>{RESET} Started: {label}\n")
                 sys.stdout.flush()
@@ -300,18 +302,17 @@ class StatusBoard:
             if key in self._order:
                 self._order.remove(key)
             self._tasks.pop(key, None)
-            self._started.pop(key, None)
             # Build the whole clear+print+redraw update as one string and
             # emit it in a single write()+flush(): issuing several writes in
             # a row (each ending in a newline, which auto-flushes a
             # line-buffered TTY stream) makes the terminal render the clear
             # and the redraw as separate visible frames, i.e. a flicker.
-            out = self._clear_sequence() if self.enabled else ""
+            out = self._clear_line() if self.enabled else ""
             out += summary_line + "\n"
             if full_log is not None:
                 out += full_log + "\n"
             if self.enabled:
-                out += self._render_sequence()
+                out += self._status_line()
             sys.stdout.write(out)
             sys.stdout.flush()
 
@@ -319,11 +320,10 @@ class StatusBoard:
         while not self._stop.wait(self.INTERVAL):
             with self._lock:
                 self._frame += 1
-                now = time.monotonic()
                 inserted = ""
                 for key in self._order:
                     task = self._tasks[key]
-                    if not task.verbose and now - self._started[key] > VERBOSE_AFTER_SECONDS:
+                    if not task.verbose and task.elapsed() > VERBOSE_AFTER_SECONDS:
                         task.verbose = True
                         inserted += task.pop_pending_output(
                             note=colored(
@@ -335,62 +335,51 @@ class StatusBoard:
                         inserted += task.pop_pending_output()
 
                 if inserted:
-                    # New lines have to be inserted above the spinner block,
+                    # New lines have to be inserted above the status line,
                     # which reflows it anyway, so a full clear+rebuild here
                     # is unavoidable -- but this only happens once per
                     # promotion or new output, not on every animation tick.
-                    out = (self._clear_sequence() if self.enabled else "") + inserted
-                    out += self._render_sequence() if self.enabled else ""
+                    out = (self._clear_line() if self.enabled else "") + inserted
+                    out += self._status_line() if self.enabled else ""
                 else:
-                    out = self._update_sequence() if self.enabled else ""
+                    out = self._update_line() if self.enabled else ""
 
                 if out:
                     sys.stdout.write(out)
                     sys.stdout.flush()
 
-    def _render_sequence(self) -> str:
-        """Full (re)draw of the spinner block from scratch."""
-        now = time.monotonic()
-        frame = self.FRAMES[self._frame % len(self.FRAMES)]
-        lines = [
-            f"{CYAN}{frame}{RESET} {self._tasks[key].status_label} "
-            f"{DIM}({now - self._started[key]:0.1f}s){RESET}"
-            for key in self._order
-        ]
-        self._drawn_lines = len(lines)
-        return "".join(f"{line}\033[K\n" for line in lines)
-
-    def _update_sequence(self) -> str:
-        """In-place redraw: move up, then per line write-then-trim, never
-        erasing before there is already new content on that line."""
-        old_count = self._drawn_lines
-        now = time.monotonic()
-        frame = self.FRAMES[self._frame % len(self.FRAMES)]
-        lines = [
-            f"{CYAN}{frame}{RESET} {self._tasks[key].status_label} "
-            f"{DIM}({now - self._started[key]:0.1f}s){RESET}"
-            for key in self._order
-        ]
-        parts = []
-        if old_count:
-            parts.append(f"\033[{old_count}A")
-        for line in lines:
-            parts.append(f"\r{line}\033[K\n")
-        for _ in range(max(0, old_count - len(lines))):
-            parts.append("\r\033[K\n")
-        if old_count > len(lines):
-            parts.append(f"\033[{old_count - len(lines)}A")
-        self._drawn_lines = len(lines)
-        return "".join(parts)
-
-    def _clear_sequence(self) -> str:
-        # Move the cursor up over the previously drawn lines and erase them,
-        # so the next draw (or a finished-task print) starts from a clean slate.
-        if not self._drawn_lines:
+    def _status_text(self) -> str:
+        if not self._order:
             return ""
-        sequence = f"\033[{self._drawn_lines}A\033[J"
-        self._drawn_lines = 0
-        return sequence
+        frame = self.FRAMES[self._frame % len(self.FRAMES)]
+        if len(self._order) == 1:
+            detail = self._tasks[self._order[0]].status_label
+        else:
+            detail = ", ".join(self._tasks[key].label for key in self._order)
+        return f"{CYAN}{frame}{RESET} {len(self._order)} running: {detail}"
+
+    def _status_line(self) -> str:
+        """Fresh draw of the status line (cursor already at column 0)."""
+        text = self._status_text()
+        self._line_drawn = bool(text)
+        return f"{text}\033[K" if text else ""
+
+    def _update_line(self) -> str:
+        """In-place redraw: write new text, then trim leftovers -- never
+        erase before there is already new content on the line, since an
+        erase-then-redraw leaves a visible blank frame on terminals that
+        don't coalesce the two into one screen update."""
+        text = self._status_text()
+        if not text:
+            return self._clear_line()
+        self._line_drawn = True
+        return f"\r{text}\033[K"
+
+    def _clear_line(self) -> str:
+        if not self._line_drawn:
+            return ""
+        self._line_drawn = False
+        return "\r\033[K"
 
 
 class Task:
