@@ -36,6 +36,27 @@ RELEASE_ASSET_ARCH = {"amd64": "x86_64", "arm64": "arm64"}
 _release_cache = None
 
 
+def github_token() -> str | None:
+    """Resolve a token to authenticate GitHub API requests with.
+
+    Checks GITHUB_TOKEN/GH_TOKEN first, then falls back to `gh auth token`
+    (the GitHub CLI's stored credential) so an authenticated `gh` login
+    alone is enough to get the 5000/hour rate limit -- no env var needed.
+    Returns None (falling back to an anonymous request) when neither is
+    available.
+    """
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        return token
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "token"], capture_output=True, text=True
+        )
+    except FileNotFoundError:
+        return None
+    return result.stdout.strip() or None if result.returncode == 0 else None
+
+
 def github_latest_release():
     """Fetch the latest Neovim release metadata from the GitHub API.
 
@@ -52,7 +73,7 @@ def github_latest_release():
 
     # Authenticate when a token is available to get the much higher
     # 5000/hour rate limit instead of the 60/hour anonymous one.
-    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    token = github_token()
     args = ["curl", "-fsSL"]
     if token:
         args += ["-H", f"Authorization: Bearer {token}"]
