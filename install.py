@@ -1227,6 +1227,12 @@ def parse_args() -> argparse.Namespace:
         help="check for updates without building or installing packages",
     )
     parser.add_argument(
+        "-l",
+        "--list",
+        action="store_true",
+        help="list all available package targets and exit",
+    )
+    parser.add_argument(
         "-j",
         "--jobs",
         type=int,
@@ -1234,11 +1240,35 @@ def parse_args() -> argparse.Namespace:
         metavar="N",
         help=f"number of packages to check/build concurrently (default: {DEFAULT_JOBS})",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.list and args.target is not None:
+        parser.error("--list cannot be combined with a target")
+    return args
+
+
+def list_targets() -> int:
+    """Print each configured local or AUR target once, in list order."""
+    if not INSTALL_LIST.is_file() and not INSTALL_LIST_AUR.is_file():
+        print(
+            f"{RED}ERROR: Neither install-list nor install-list-aur exists.{RESET}",
+            file=sys.stderr,
+        )
+        return 1
+
+    seen: set[str] = set()
+    for path in (INSTALL_LIST, INSTALL_LIST_AUR):
+        for entry in read_package_list(path):
+            if entry in seen:
+                continue
+            seen.add(entry)
+            print(entry)
+    return 0
 
 
 def main() -> int:
     args = parse_args()
+    if args.list:
+        return list_targets()
     return Installer(
         check_only=args.check,
         jobs=max(1, args.jobs),

@@ -192,5 +192,55 @@ class InstallerTargetTest(unittest.TestCase):
         self.assertEqual(args.target, "rustdesk")
 
 
+class ListTargetsTest(unittest.TestCase):
+    def test_short_list_option_prints_local_and_aur_targets_once(self) -> None:
+        output = io.StringIO()
+
+        def package_entries(path):
+            if path == install.INSTALL_LIST:
+                return ["local-one", "shared"]
+            return ["aur-one", "shared"]
+
+        with (
+            patch.object(sys, "argv", ["install.py", "-l"]),
+            patch.object(install, "read_package_list", side_effect=package_entries),
+            patch.object(install.Installer, "run") as installer_run,
+            patch.object(sys, "stdout", output),
+        ):
+            result = install.main()
+
+        self.assertEqual(result, 0)
+        self.assertEqual(output.getvalue(), "local-one\nshared\naur-one\n")
+        installer_run.assert_not_called()
+
+    def test_list_fails_when_both_configuration_files_are_missing(self) -> None:
+        error = io.StringIO()
+
+        with (
+            patch.object(install.Path, "is_file", return_value=False),
+            patch.object(sys, "stderr", error),
+        ):
+            result = install.list_targets()
+
+        self.assertEqual(result, 1)
+        self.assertIn(
+            "Neither install-list nor install-list-aur exists",
+            error.getvalue(),
+        )
+
+    def test_list_cannot_be_combined_with_a_target(self) -> None:
+        error = io.StringIO()
+
+        with (
+            patch.object(sys, "argv", ["install.py", "--list", "rustdesk"]),
+            patch.object(sys, "stderr", error),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            install.parse_args()
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("--list cannot be combined with a target", error.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
