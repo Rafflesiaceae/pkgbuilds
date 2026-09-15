@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 
+import io
 import os
 import shutil
+import subprocess
+import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -54,6 +57,44 @@ class StatusBoardTest(unittest.TestCase):
         # The renderer adds only the frame's cyan and reset sequences.
         self.assertEqual(text.count("\033["), 2 if install.COLOR else 0)
         self.assertIn("$ long command", install.ANSI_ESCAPE.sub("", text))
+
+    def test_suspend_buffers_finished_tasks_until_prompt_is_done(self) -> None:
+        self.board._line_drawn = True
+        output = io.StringIO()
+
+        with patch.object(sys, "stdout", output):
+            self.board.suspend()
+            self.board.finish_task("task", "finished", None)
+            suspended_output = output.getvalue()
+            self.board.resume()
+
+        self.assertNotIn("finished", suspended_output)
+        self.assertIn("finished", output.getvalue())
+
+
+class InteractiveSudoTest(unittest.TestCase):
+    def test_missing_sudo_timestamp_is_authenticated_outside_spinner(self) -> None:
+        board = install.StatusBoard(enabled=True)
+        task = install.Task(board, "LOCAL: example")
+        command_results = [
+            subprocess.CompletedProcess(["sudo", "-n", "-v"], 1, "", ""),
+            subprocess.CompletedProcess(["sudo", "-v"], 0, None, None),
+            subprocess.CompletedProcess(["makepkg"], 0, "", ""),
+        ]
+        output = io.StringIO()
+
+        with (
+            patch.object(install, "command", side_effect=command_results) as command,
+            patch.object(sys.stdin, "isatty", return_value=True),
+            patch.object(sys, "stdout", output),
+        ):
+            result = task.run_exclusive(["makepkg"])
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(command.call_args_list[0].args[0], ["sudo", "-n", "-v"])
+        self.assertEqual(command.call_args_list[1].args[0], ["sudo", "-v"])
+        self.assertIn("\033[?25h", output.getvalue())
+        self.assertIn("\033[?25l", output.getvalue())
 
 
 if __name__ == "__main__":

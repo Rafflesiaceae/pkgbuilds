@@ -307,6 +307,8 @@ class StatusBoard:
         self._tasks: dict[str, "Task"] = {}
         self._frame = 0
         self._line_drawn = False
+        self._suspended = False
+        self._pending_finished: list[str] = []
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -341,11 +343,56 @@ class StatusBoard:
                 sys.stdout.write(f"{DIM}==>{RESET} Started: {label}\n")
                 sys.stdout.flush()
 
+    def suspend(self) -> None:
+        """Clear the spinner and expose the terminal for an interactive prompt."""
+        if not self.enabled:
+            return
+        with self._lock:
+            if self._suspended:
+                return
+            self._suspended = True
+            # Move prompt output to a fresh row so it cannot overwrite the
+            # spinner that was just cleared. The cursor is shown for password
+            # input and other prompts that rely on normal terminal feedback.
+            out = self._clear_line()
+            if out:
+                out += "\n"
+            out += "\033[?25h"
+            sys.stdout.write(out)
+            sys.stdout.flush()
+
+    def resume(self) -> None:
+        """Restore the spinner after an interactive command has completed."""
+        if not self.enabled:
+            return
+        with self._lock:
+            if not self._suspended:
+                return
+            self._suspended = False
+            # Completions from other workers are held until the prompt is
+            # finished, otherwise their normal status lines would interleave
+            # with the password prompt.
+            out = "".join(self._pending_finished)
+            self._pending_finished.clear()
+            out += "\033[?25l"
+            out += self._status_line()
+            if out:
+                sys.stdout.write(out)
+                sys.stdout.flush()
+
     def finish_task(self, key: str, summary_line: str, full_log: str | None) -> None:
         with self._lock:
             if key in self._order:
                 self._order.remove(key)
             self._tasks.pop(key, None)
+            if self._suspended:
+                # `suspend()` already cleared the live line, so retain only
+                # the completed task output for `resume()` to print later.
+                out = summary_line + "\n"
+                if full_log is not None:
+                    out += full_log + "\n"
+                self._pending_finished.append(out)
+                return
             # Build the whole clear+print+redraw update as one string and
             # emit it in a single write()+flush(): issuing several writes in
             # a row (each ending in a newline, which auto-flushes a
@@ -363,6 +410,8 @@ class StatusBoard:
     def _tick_loop(self) -> None:
         while not self._stop.wait(self.INTERVAL):
             with self._lock:
+                if self._suspended:
+                    continue
                 self._frame += 1
                 inserted = ""
                 for key in self._order:
@@ -527,6 +576,20 @@ class Task:
         self.status_label = "waiting for package-manager lock..."
         with PACMAN_LOCK:
             self.status_label = f"running: {' '.join(str(a) for a in args)}"
+            if sys.stdin.isatty():
+                # A non-interactive probe avoids disturbing an already valid
+                # sudo timestamp. When it fails, run the real validation with
+                # the terminal attached while the spinner is suspended so any
+                # password prompt remains visible and usable.
+                auth = command(["sudo", "-n", "-v"], capture=True)
+                if auth.returncode != 0:
+                    self.board.suspend()
+                    try:
+                        auth = command(["sudo", "-v"])
+                    finally:
+                        self.board.resume()
+                    if auth.returncode != 0:
+                        return auth
             return self.run(args, cwd=cwd, extra_env=extra_env, parsed_output=parsed_output)
 
     def queue(self, wanted: str, packages: Iterable[Path], *, force: bool = False) -> None:
