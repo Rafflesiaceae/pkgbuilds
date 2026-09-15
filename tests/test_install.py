@@ -119,7 +119,11 @@ class InteractiveSudoTest(unittest.TestCase):
         notify.assert_called_once_with("LOCAL: example")
 
     def test_sudo_notification_uses_notify_send(self) -> None:
-        with patch.object(install.subprocess, "run") as run:
+        with (
+            patch.object(install, "PROCESS_STARTED_AT", 0.0),
+            patch.object(install.time, "monotonic", return_value=2.0),
+            patch.object(install.subprocess, "run") as run,
+        ):
             install.notify_sudo_prompt("LOCAL: example")
 
         arguments = run.call_args.args[0]
@@ -128,12 +132,35 @@ class InteractiveSudoTest(unittest.TestCase):
         self.assertIn("LOCAL: example", arguments[-1])
 
     def test_sudo_notification_failure_does_not_break_install(self) -> None:
-        with patch.object(
-            install.subprocess,
-            "run",
-            side_effect=FileNotFoundError("notify-send"),
+        with (
+            patch.object(install, "PROCESS_STARTED_AT", 0.0),
+            patch.object(install.time, "monotonic", return_value=2.0),
+            patch.object(
+                install.subprocess,
+                "run",
+                side_effect=FileNotFoundError("notify-send"),
+            ),
         ):
             install.notify_sudo_prompt("LOCAL: example")
+
+    def test_sudo_notification_is_deferred_during_startup(self) -> None:
+        with (
+            patch.object(install, "PROCESS_STARTED_AT", 10.0),
+            patch.object(install.time, "monotonic", return_value=10.5),
+            patch.object(install.threading, "Timer") as create,
+            patch.object(install, "_send_sudo_notification") as send,
+        ):
+            install.notify_sudo_prompt("LOCAL: example")
+
+        timer = create.return_value
+        create.assert_called_once_with(
+            1.5,
+            send,
+            args=("LOCAL: example",),
+        )
+        self.assertTrue(timer.daemon)
+        timer.start.assert_called_once_with()
+        send.assert_not_called()
 
 
 class InstallerSummaryTest(unittest.TestCase):

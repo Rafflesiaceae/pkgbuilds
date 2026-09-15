@@ -30,6 +30,10 @@ SEPARATOR = "=" * 64
 # Default worker count for the parallel check/build phase (-j/--jobs).
 DEFAULT_JOBS = 4
 
+# Avoid an immediate desktop alert while the user is still watching startup.
+SUDO_NOTIFICATION_AFTER_SECONDS = 2.0
+PROCESS_STARTED_AT = time.monotonic()
+
 # pacman/apt/dpkg each hold a single system-wide database lock, so running
 # more than one package-manager mutation at a time doesn't parallelize
 # anything -- it just makes the losing process fail with a lock-contention
@@ -136,8 +140,8 @@ def command(
     )
 
 
-def notify_sudo_prompt(context: str) -> None:
-    """Best-effort desktop alert before an operation may prompt via sudo."""
+def _send_sudo_notification(context: str) -> None:
+    """Send a best-effort desktop alert for a possible sudo prompt."""
     try:
         subprocess.run(
             [
@@ -156,6 +160,20 @@ def notify_sudo_prompt(context: str) -> None:
     # A missing or unresponsive notification service must not break installs.
     except (OSError, subprocess.SubprocessError):
         pass
+
+
+def notify_sudo_prompt(context: str) -> None:
+    """Alert now or once the process has been running for two seconds."""
+    notify_at = PROCESS_STARTED_AT + SUDO_NOTIFICATION_AFTER_SECONDS
+    delay = notify_at - time.monotonic()
+    if delay <= 0:
+        _send_sudo_notification(context)
+        return
+
+    # A daemon timer avoids delaying package work or keeping a quick run alive.
+    timer = threading.Timer(delay, _send_sudo_notification, args=(context,))
+    timer.daemon = True
+    timer.start()
 
 
 def read_package_list(path: Path) -> list[str]:
