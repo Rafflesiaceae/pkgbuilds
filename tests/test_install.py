@@ -98,7 +98,7 @@ class InteractiveSudoTest(unittest.TestCase):
         self.assertIn("\033[?25h", output.getvalue())
         self.assertIn("\033[?25l", output.getvalue())
 
-    def test_valid_sudo_timestamp_still_notifies_before_nested_sudo(self) -> None:
+    def test_valid_sudo_timestamp_routes_nested_sudo_through_wrapper(self) -> None:
         board = install.StatusBoard(enabled=False)
         command_results = [
             subprocess.CompletedProcess(["sudo", "-n", "-v"], 0, "", ""),
@@ -107,7 +107,11 @@ class InteractiveSudoTest(unittest.TestCase):
         output = io.StringIO()
 
         with (
-            patch.object(install, "command", side_effect=command_results),
+            patch.object(
+                install,
+                "command",
+                side_effect=command_results,
+            ) as command,
             patch.object(install, "notify_sudo_prompt") as notify,
             patch.object(sys.stdin, "isatty", return_value=True),
             patch.object(sys, "stdout", output),
@@ -116,7 +120,75 @@ class InteractiveSudoTest(unittest.TestCase):
             result = task.run_exclusive(["makepkg"])
 
         self.assertEqual(result.returncode, 0)
-        notify.assert_called_once_with("LOCAL: example")
+        notify.assert_not_called()
+        command_env = command.call_args_list[-1].kwargs["extra_env"]
+        self.assertEqual(command_env["INSTALL_PY_SUDO_CONTEXT"], "LOCAL: example")
+        self.assertEqual(
+            command_env["PATH"].split(os.pathsep)[0],
+            str(install.SUDO_WRAPPER.parent),
+        )
+
+    def test_nested_sudo_environment_prepends_wrapper(self) -> None:
+        with patch.object(install.shutil, "which", return_value="/usr/bin/sudo"):
+            env = install.nested_sudo_environment(
+                "LOCAL: example",
+                {"PATH": "/usr/bin", "PKGDEST": "/packages"},
+            )
+
+        self.assertEqual(
+            env["PATH"].split(os.pathsep),
+            [str(install.SUDO_WRAPPER.parent), "/usr/bin"],
+        )
+        self.assertEqual(env["INSTALL_PY_SUDO_CONTEXT"], "LOCAL: example")
+        self.assertEqual(env["INSTALL_PY_REAL_SUDO"], "/usr/bin/sudo")
+        self.assertEqual(env["PKGDEST"], "/packages")
+
+    def test_nested_sudo_wrapper_notifies_at_actual_invocation(self) -> None:
+        wrapper_env = {
+            "INSTALL_PY_STARTED_AT": "10.0",
+            "INSTALL_PY_SUDO_CONTEXT": "LOCAL: example",
+            "INSTALL_PY_REAL_SUDO": "/usr/bin/sudo",
+        }
+
+        with (
+            patch.dict(os.environ, wrapper_env, clear=True),
+            patch.object(install.time, "monotonic", return_value=12.0),
+            patch.object(install, "_send_sudo_notification") as send,
+            patch.object(
+                install.os,
+                "execv",
+                side_effect=RuntimeError("exec"),
+            ) as execv,
+            self.assertRaisesRegex(RuntimeError, "exec"),
+        ):
+            install.run_sudo_wrapper(["-k", "true"])
+
+        send.assert_called_once_with("LOCAL: example")
+        execv.assert_called_once_with(
+            "/usr/bin/sudo",
+            ["/usr/bin/sudo", "-k", "true"],
+        )
+
+    def test_nested_sudo_wrapper_swallows_startup_notification(self) -> None:
+        wrapper_env = {
+            "INSTALL_PY_STARTED_AT": "10.0",
+            "INSTALL_PY_REAL_SUDO": "/usr/bin/sudo",
+        }
+
+        with (
+            patch.dict(os.environ, wrapper_env, clear=True),
+            patch.object(install.time, "monotonic", return_value=11.5),
+            patch.object(install, "_send_sudo_notification") as send,
+            patch.object(
+                install.os,
+                "execv",
+                side_effect=RuntimeError("exec"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "exec"),
+        ):
+            install.run_sudo_wrapper(["true"])
+
+        send.assert_not_called()
 
     def test_sudo_notification_uses_notify_send(self) -> None:
         with (

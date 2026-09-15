@@ -24,6 +24,7 @@ PKGBUILD_ROOT = Path(__file__).resolve().parent
 INSTALL_LIST = PKGBUILD_ROOT / "install-list"
 INSTALL_LIST_AUR = PKGBUILD_ROOT / "install-list-aur"
 AUR_BUILD_ROOT = PKGBUILD_ROOT / ".aur-build"
+SUDO_WRAPPER = PKGBUILD_ROOT / "libexec" / "sudo"
 
 SEPARATOR = "=" * 64
 
@@ -168,6 +169,35 @@ def notify_sudo_prompt(context: str) -> None:
     if elapsed < SUDO_NOTIFICATION_AFTER_SECONDS:
         return
     _send_sudo_notification(context)
+
+
+def nested_sudo_environment(
+    context: str, extra_env: dict[str, str] | None
+) -> dict[str, str]:
+    """Route child sudo calls through the notification-aware wrapper."""
+    env = dict(extra_env or {})
+    inherited_path = env.get("PATH", os.environ.get("PATH", ""))
+    env["PATH"] = f"{SUDO_WRAPPER.parent}{os.pathsep}{inherited_path}"
+    env["INSTALL_PY_STARTED_AT"] = str(PROCESS_STARTED_AT)
+    env["INSTALL_PY_SUDO_CONTEXT"] = context
+    # Resolve sudo before prepending the wrapper directory to the child PATH.
+    env["INSTALL_PY_REAL_SUDO"] = shutil.which("sudo") or "/usr/bin/sudo"
+    return env
+
+
+def run_sudo_wrapper(args: Sequence[str]) -> None:
+    """Notify at the actual nested sudo invocation, then replace this process."""
+    try:
+        started_at = float(os.environ["INSTALL_PY_STARTED_AT"])
+    except (KeyError, ValueError):
+        started_at = time.monotonic()
+
+    if time.monotonic() - started_at >= SUDO_NOTIFICATION_AFTER_SECONDS:
+        context = os.environ.get("INSTALL_PY_SUDO_CONTEXT", "Package operation")
+        _send_sudo_notification(context)
+
+    real_sudo = os.environ.get("INSTALL_PY_REAL_SUDO", "/usr/bin/sudo")
+    os.execv(real_sudo, [real_sudo, *args])
 
 
 def read_package_list(path: Path) -> list[str]:
@@ -610,7 +640,6 @@ class Task:
         self.status_label = "waiting for package-manager lock..."
         with PACMAN_LOCK:
             self.status_label = f"running: {' '.join(str(a) for a in args)}"
-            notified = False
             if sys.stdin.isatty():
                 # A non-interactive probe avoids disturbing an already valid
                 # sudo timestamp. When it fails, run the real validation with
@@ -619,7 +648,6 @@ class Task:
                 auth = command(["sudo", "-n", "-v"], capture=True)
                 if auth.returncode != 0:
                     notify_sudo_prompt(self.label)
-                    notified = True
                     self.board.suspend()
                     try:
                         auth = command(["sudo", "-v"])
@@ -627,11 +655,16 @@ class Task:
                         self.board.resume()
                     if auth.returncode != 0:
                         return auth
-            if not notified:
-                # Commands such as makepkg can start another sudo process even
-                # after the validation above succeeded, so alert before launch.
-                notify_sudo_prompt(self.label)
-            return self.run(args, cwd=cwd, extra_env=extra_env, parsed_output=parsed_output)
+            # makepkg deliberately invokes `sudo -k`, so pre-authentication
+            # cannot reveal or prevent its later password prompt. Put a small
+            # wrapper first in PATH to notify when that sudo actually starts.
+            command_env = nested_sudo_environment(self.label, extra_env)
+            return self.run(
+                args,
+                cwd=cwd,
+                extra_env=command_env,
+                parsed_output=parsed_output,
+            )
 
     def queue(self, wanted: str, packages: Iterable[Path], *, force: bool = False) -> None:
         packages = list(packages)
@@ -1309,6 +1342,10 @@ def list_targets() -> int:
 
 
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "--internal-sudo-wrapper":
+        run_sudo_wrapper(sys.argv[2:])
+        return 1
+
     args = parse_args()
     if args.list:
         return list_targets()

@@ -1,0 +1,4 @@
+#!/bin/sh
+
+# Let install.py notify at the moment a child command actually invokes sudo.
+exec /usr/bin/env python3 "$(dirname "$0")/../install.py" --internal-sudo-wrapper "$@"
