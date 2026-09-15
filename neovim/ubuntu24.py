@@ -33,21 +33,39 @@ GITHUB_LATEST_RELEASE_API = "https://api.github.com/repos/neovim/neovim/releases
 RELEASE_ASSET_ARCH = {"amd64": "x86_64", "arm64": "arm64"}
 
 
+_release_cache = None
+
+
 def github_latest_release():
     """Fetch the latest Neovim release metadata from the GitHub API.
 
+    Cached for the lifetime of the process: a plain --install run already
+    calls this once via check_up_to_date() and again via build(), and
+    unauthenticated GitHub API requests are capped at 60/hour, so doubling
+    up needlessly eats into that budget.
+
     Returns None on network error or unexpected JSON shape.
     """
-    result = subprocess.run(
-        ["curl", "-fsSL", GITHUB_LATEST_RELEASE_API],
-        capture_output=True, text=True,
-    )
+    global _release_cache
+    if _release_cache is not None:
+        return _release_cache
+
+    # Authenticate when a token is available to get the much higher
+    # 5000/hour rate limit instead of the 60/hour anonymous one.
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    args = ["curl", "-fsSL"]
+    if token:
+        args += ["-H", f"Authorization: Bearer {token}"]
+    args.append(GITHUB_LATEST_RELEASE_API)
+
+    result = subprocess.run(args, capture_output=True, text=True)
     if result.returncode != 0:
         return None
     try:
-        return json.loads(result.stdout)
+        _release_cache = json.loads(result.stdout)
     except json.JSONDecodeError:
         return None
+    return _release_cache
 
 
 def github_latest():
