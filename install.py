@@ -6,12 +6,14 @@ import argparse
 import hashlib
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
 import threading
 import time
 import traceback
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -223,6 +225,48 @@ def dependency_name(requirement: str) -> str:
 
 VERBOSE_AFTER_SECONDS = 60.0
 
+# Status labels can contain the color sequences also used in the buffered
+# task log. They must not count toward the terminal width or be cut in half.
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def terminal_text_width(text: str) -> int:
+    """Return the number of terminal cells occupied by plain text."""
+    width = 0
+    for character in text:
+        if unicodedata.combining(character):
+            continue
+        # Terminal control characters occupy no cells. Status text should not
+        # normally contain them, but treating them as zero keeps this helper
+        # correct for sanitized command output as well.
+        if unicodedata.category(character).startswith("C"):
+            continue
+        width += 2 if unicodedata.east_asian_width(character) in {"F", "W"} else 1
+    return width
+
+
+def fit_terminal_line(text: str, columns: int) -> str:
+    """Trim text so an in-place status line cannot wrap in the terminal."""
+    # Leave the last column unused. Some terminals enter pending-wrap state
+    # when it is filled, making a later carriage return act inconsistently.
+    available = max(0, columns - 1)
+    if terminal_text_width(text) <= available:
+        return text
+    if available == 0:
+        return ""
+
+    ellipsis = "…"
+    content_width = available - terminal_text_width(ellipsis)
+    width = 0
+    result: list[str] = []
+    for character in text:
+        character_width = terminal_text_width(character)
+        if width + character_width > content_width:
+            break
+        result.append(character)
+        width += character_width
+    return "".join(result) + ellipsis
+
 
 class StatusBoard:
     """Thread-safe live status display for concurrently running tasks.
@@ -356,7 +400,19 @@ class StatusBoard:
             detail = self._tasks[self._order[0]].status_label
         else:
             detail = ", ".join(self._tasks[key].label for key in self._order)
-        return f"{CYAN}{frame}{RESET} {len(self._order)} running: {detail}"
+        # A carriage return only moves to the start of the current physical
+        # row. If this text wraps, subsequent frames are therefore redrawn on
+        # the wrapped row and accumulate instead of replacing one another.
+        plain_text = ANSI_ESCAPE.sub(
+            "", f"{frame} {len(self._order)} running: {detail}"
+        )
+        columns = shutil.get_terminal_size(fallback=(80, 24)).columns
+        fitted = fit_terminal_line(plain_text, columns)
+        if not fitted:
+            return ""
+        # Only the first character is the spinner frame; applying its color
+        # after fitting keeps escape sequences out of the width calculation.
+        return f"{CYAN}{fitted[0]}{RESET}{fitted[1:]}"
 
     def _status_line(self) -> str:
         """Fresh draw of the status line (cursor already at column 0)."""
