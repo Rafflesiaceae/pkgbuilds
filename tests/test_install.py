@@ -143,23 +143,14 @@ class InteractiveSudoTest(unittest.TestCase):
         ):
             install.notify_sudo_prompt("LOCAL: example")
 
-    def test_sudo_notification_is_deferred_during_startup(self) -> None:
+    def test_sudo_notification_is_suppressed_during_startup(self) -> None:
         with (
             patch.object(install, "PROCESS_STARTED_AT", 10.0),
             patch.object(install.time, "monotonic", return_value=10.5),
-            patch.object(install.threading, "Timer") as create,
             patch.object(install, "_send_sudo_notification") as send,
         ):
             install.notify_sudo_prompt("LOCAL: example")
 
-        timer = create.return_value
-        create.assert_called_once_with(
-            1.5,
-            send,
-            args=("LOCAL: example",),
-        )
-        self.assertTrue(timer.daemon)
-        timer.start.assert_called_once_with()
         send.assert_not_called()
 
 

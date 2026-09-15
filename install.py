@@ -31,7 +31,7 @@ SEPARATOR = "=" * 64
 DEFAULT_JOBS = 4
 
 # Avoid an immediate desktop alert while the user is still watching startup.
-SUDO_NOTIFICATION_AFTER_SECONDS = 2.0
+SUDO_NOTIFICATION_AFTER_SECONDS = 5.0
 PROCESS_STARTED_AT = time.monotonic()
 
 # pacman/apt/dpkg each hold a single system-wide database lock, so running
@@ -163,17 +163,11 @@ def _send_sudo_notification(context: str) -> None:
 
 
 def notify_sudo_prompt(context: str) -> None:
-    """Alert now or once the process has been running for two seconds."""
-    notify_at = PROCESS_STARTED_AT + SUDO_NOTIFICATION_AFTER_SECONDS
-    delay = notify_at - time.monotonic()
-    if delay <= 0:
-        _send_sudo_notification(context)
+    """Ignore startup alerts, then send later requests immediately."""
+    elapsed = time.monotonic() - PROCESS_STARTED_AT
+    if elapsed < SUDO_NOTIFICATION_AFTER_SECONDS:
         return
-
-    # A daemon timer avoids delaying package work or keeping a quick run alive.
-    timer = threading.Timer(delay, _send_sudo_notification, args=(context,))
-    timer.daemon = True
-    timer.start()
+    _send_sudo_notification(context)
 
 
 def read_package_list(path: Path) -> list[str]:
