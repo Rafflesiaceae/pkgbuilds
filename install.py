@@ -1007,13 +1007,28 @@ def run_task(kind: str, entry: str, board: StatusBoard, check_only: bool) -> Tas
 
 
 class Installer:
-    def __init__(self, check_only: bool, jobs: int) -> None:
+    def __init__(self, check_only: bool, jobs: int, target: str | None = None) -> None:
         self.check_only = check_only
         self.jobs = jobs
+        self.target = target
         self.stats = Stats()
         self.failed_entries: list[str] = []
         self.install_packages: list[Path] = []
         self.force_install_packages: list[Path] = []
+
+    def _selected_entries(self, path: Path) -> list[str]:
+        """Return every configured entry, or only the requested target."""
+        entries = read_package_list(path)
+        if self.target is None:
+            return entries
+        return [entry for entry in entries if entry == self.target]
+
+    def _target_not_found(self, lists: str) -> int:
+        print(
+            f"{RED}ERROR: Target {self.target!r} was not found in {lists}.{RESET}",
+            file=sys.stderr,
+        )
+        return 1
 
     def _print_failed_entries(self) -> None:
         if not self.failed_entries:
@@ -1067,6 +1082,10 @@ class Installer:
             )
             return 1
 
+        if self.target is not None and not valid_entry(self.target):
+            print(f"{RED}ERROR: Invalid target: {self.target}{RESET}", file=sys.stderr)
+            return 1
+
         # Dispatch to the Ubuntu 24.x flow when running on that distro.
         if is_ubuntu_24():
             return self._run_ubuntu24()
@@ -1076,13 +1095,16 @@ class Installer:
     def _run_ubuntu24(self) -> int:
         """Process all install-list entries via their ubuntu24.py scripts."""
         jobs: list[tuple[str, str]] = []
-        for entry in read_package_list(INSTALL_LIST):
+        for entry in self._selected_entries(INSTALL_LIST):
             if not valid_entry(entry):
                 print(f"{RED}ERROR: Invalid install-list entry: {entry}{RESET}", file=sys.stderr)
                 self.stats.failed += 1
                 self.failed_entries.append(f"UBUNTU24: {entry}")
                 continue
             jobs.append(("ubuntu24", entry))
+
+        if self.target is not None and not jobs:
+            return self._target_not_found("install-list")
 
         self._run_jobs(jobs)
 
@@ -1114,7 +1136,7 @@ class Installer:
             AUR_BUILD_ROOT.mkdir(parents=True, exist_ok=True)
 
         jobs: list[tuple[str, str]] = []
-        for entry in read_package_list(INSTALL_LIST):
+        for entry in self._selected_entries(INSTALL_LIST):
             if not valid_entry(entry):
                 print(f"{RED}ERROR: Invalid install-list entry: {entry}{RESET}", file=sys.stderr)
                 self.stats.failed += 1
@@ -1122,13 +1144,16 @@ class Installer:
                 continue
             jobs.append(("local", entry))
 
-        for entry in read_package_list(INSTALL_LIST_AUR):
+        for entry in self._selected_entries(INSTALL_LIST_AUR):
             if not valid_entry(entry):
                 print(f"{RED}ERROR: Invalid install-list-aur entry: {entry}{RESET}", file=sys.stderr)
                 self.stats.failed += 1
                 self.failed_entries.append(f"AUR: {entry}")
                 continue
             jobs.append(("aur", entry))
+
+        if self.target is not None and not jobs:
+            return self._target_not_found("install-list or install-list-aur")
 
         # Local and AUR entries are submitted together so network-bound AUR
         # checks and disk/CPU-bound local builds overlap instead of running
@@ -1191,6 +1216,11 @@ class Installer:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "target",
+        nargs="?",
+        help="process only this package entry",
+    )
+    parser.add_argument(
         "-c",
         "--check",
         action="store_true",
@@ -1209,7 +1239,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    return Installer(check_only=args.check, jobs=max(1, args.jobs)).run()
+    return Installer(
+        check_only=args.check,
+        jobs=max(1, args.jobs),
+        target=args.target,
+    ).run()
 
 
 if __name__ == "__main__":

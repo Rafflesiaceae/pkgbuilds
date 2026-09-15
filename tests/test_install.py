@@ -112,5 +112,85 @@ class InstallerSummaryTest(unittest.TestCase):
         )
 
 
+class InstallerTargetTest(unittest.TestCase):
+    def test_arch_target_selects_only_matching_local_entry(self) -> None:
+        installer = install.Installer(check_only=True, jobs=2, target="rustdesk")
+        output = io.StringIO()
+
+        def package_entries(path):
+            if path == install.INSTALL_LIST:
+                return ["other-local", "rustdesk"]
+            return ["other-aur"]
+
+        with (
+            patch.object(install, "read_package_list", side_effect=package_entries),
+            patch.object(installer, "_run_jobs") as run_jobs,
+            patch.object(sys, "stdout", output),
+        ):
+            result = installer._run_arch()
+
+        self.assertEqual(result, 0)
+        run_jobs.assert_called_once_with([("local", "rustdesk")])
+
+    def test_arch_target_selects_only_matching_aur_entry(self) -> None:
+        installer = install.Installer(check_only=True, jobs=2, target="aur-target")
+        output = io.StringIO()
+
+        def package_entries(path):
+            if path == install.INSTALL_LIST:
+                return ["other-local"]
+            return ["other-aur", "aur-target"]
+
+        with (
+            patch.object(install, "read_package_list", side_effect=package_entries),
+            patch.object(installer, "_run_jobs") as run_jobs,
+            patch.object(sys, "stdout", output),
+        ):
+            result = installer._run_arch()
+
+        self.assertEqual(result, 0)
+        run_jobs.assert_called_once_with([("aur", "aur-target")])
+
+    def test_ubuntu_target_selects_only_matching_entry(self) -> None:
+        installer = install.Installer(check_only=True, jobs=2, target="rustdesk")
+        output = io.StringIO()
+
+        with (
+            patch.object(
+                install,
+                "read_package_list",
+                return_value=["other-local", "rustdesk"],
+            ),
+            patch.object(installer, "_run_jobs") as run_jobs,
+            patch.object(sys, "stdout", output),
+        ):
+            result = installer._run_ubuntu24()
+
+        self.assertEqual(result, 0)
+        run_jobs.assert_called_once_with([("ubuntu24", "rustdesk")])
+
+    def test_unknown_target_fails_without_running_jobs(self) -> None:
+        installer = install.Installer(check_only=True, jobs=2, target="missing")
+        error = io.StringIO()
+
+        with (
+            patch.object(install, "read_package_list", return_value=["other"]),
+            patch.object(installer, "_run_jobs") as run_jobs,
+            patch.object(sys, "stderr", error),
+        ):
+            result = installer._run_arch()
+
+        self.assertEqual(result, 1)
+        run_jobs.assert_not_called()
+        self.assertIn("Target 'missing' was not found", error.getvalue())
+
+    def test_positional_target_is_parsed_with_options(self) -> None:
+        with patch.object(sys, "argv", ["install.py", "--check", "rustdesk"]):
+            args = install.parse_args()
+
+        self.assertTrue(args.check)
+        self.assertEqual(args.target, "rustdesk")
+
+
 if __name__ == "__main__":
     unittest.main()
