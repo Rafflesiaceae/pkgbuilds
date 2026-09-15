@@ -1,12 +1,15 @@
+.aur-build/
 wip
+
 **/pkg
 **/src
 **/trunk
-**/*.tar*
-**/*.war
-**/*.zip
 **/*.backup
 **/*.rpm
+**/*.tar*
+**/*.tgz
+**/*.war
+**/*.zip
 
 install-list*
 
