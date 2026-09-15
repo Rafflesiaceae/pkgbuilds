@@ -1011,8 +1011,18 @@ class Installer:
         self.check_only = check_only
         self.jobs = jobs
         self.stats = Stats()
+        self.failed_entries: list[str] = []
         self.install_packages: list[Path] = []
         self.force_install_packages: list[Path] = []
+
+    def _print_failed_entries(self) -> None:
+        if not self.failed_entries:
+            return
+
+        print("Failed entries:")
+        # Parallel jobs can finish in any order, so keep the summary stable.
+        for entry in sorted(self.failed_entries):
+            print(f"  {colored(entry, RED)}")
 
     def _run_jobs(self, jobs: list[tuple[str, str]]) -> None:
         """Process entries concurrently, folding each finished Task's
@@ -1041,6 +1051,7 @@ class Installer:
                     self.stats.rebuilt += task.rebuilt
                     if not task.ok:
                         self.stats.failed += 1
+                        self.failed_entries.append(task.label)
                     if task.queued:
                         self.install_packages.append(task.queued)
                     if task.queued_force:
@@ -1069,6 +1080,7 @@ class Installer:
             if not valid_entry(entry):
                 print(f"{RED}ERROR: Invalid install-list entry: {entry}{RESET}", file=sys.stderr)
                 self.stats.failed += 1
+                self.failed_entries.append(f"UBUNTU24: {entry}")
                 continue
             jobs.append(("ubuntu24", entry))
 
@@ -1079,6 +1091,7 @@ class Installer:
             print(f"Needs update/build: {count(self.stats.outdated, YELLOW)}")
             print(f"Unchecked:          {self.stats.unchecked}")
             print(f"Failed:             {count(self.stats.failed, RED)}")
+            self._print_failed_entries()
             print(colored(SEPARATOR, DIM))
             if self.stats.failed:
                 return 1
@@ -1091,6 +1104,7 @@ class Installer:
         print(f"Rebuilt:    {colored(str(self.stats.rebuilt), GREEN) if self.stats.rebuilt else self.stats.rebuilt}")
         print(f"Skipped:    {self.stats.unchecked}")
         print(f"Failed:     {count(self.stats.failed, RED)}")
+        self._print_failed_entries()
         print(colored(SEPARATOR, DIM))
         return 1 if self.stats.failed else 0
 
@@ -1104,6 +1118,7 @@ class Installer:
             if not valid_entry(entry):
                 print(f"{RED}ERROR: Invalid install-list entry: {entry}{RESET}", file=sys.stderr)
                 self.stats.failed += 1
+                self.failed_entries.append(f"LOCAL: {entry}")
                 continue
             jobs.append(("local", entry))
 
@@ -1111,6 +1126,7 @@ class Installer:
             if not valid_entry(entry):
                 print(f"{RED}ERROR: Invalid install-list-aur entry: {entry}{RESET}", file=sys.stderr)
                 self.stats.failed += 1
+                self.failed_entries.append(f"AUR: {entry}")
                 continue
             jobs.append(("aur", entry))
 
@@ -1124,6 +1140,7 @@ class Installer:
             print(f"Needs update/build: {count(self.stats.outdated, YELLOW)}")
             print(f"Unchecked:          {self.stats.unchecked}")
             print(f"Failed:             {count(self.stats.failed, RED)}")
+            self._print_failed_entries()
             print(colored(SEPARATOR, DIM))
             if self.stats.failed:
                 return 1
@@ -1166,6 +1183,7 @@ class Installer:
         print(colored(SEPARATOR, DIM))
         print(f"Processed: {self.stats.processed}")
         print(f"Failed:    {count(self.stats.failed, RED)}")
+        self._print_failed_entries()
         print(colored(SEPARATOR, DIM))
         return 1 if self.stats.failed else 0
 

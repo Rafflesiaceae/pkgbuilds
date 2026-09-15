@@ -97,5 +97,20 @@ class InteractiveSudoTest(unittest.TestCase):
         self.assertIn("\033[?25l", output.getvalue())
 
 
+class InstallerSummaryTest(unittest.TestCase):
+    def test_failed_entries_are_listed_in_stable_order(self) -> None:
+        installer = install.Installer(check_only=True, jobs=2)
+        installer.failed_entries = ["LOCAL: zeta", "AUR: alpha"]
+        output = io.StringIO()
+
+        with patch.object(sys, "stdout", output):
+            installer._print_failed_entries()
+
+        self.assertEqual(
+            output.getvalue(),
+            "Failed entries:\n  AUR: alpha\n  LOCAL: zeta\n",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
