@@ -151,7 +151,7 @@ _pkgname='rustdesk'
 pkgname="${_pkgname}"
 _pkgver='1.4.9'
 pkgver="${_pkgver//-/.}"
-pkgrel=1
+pkgrel=2
 _sfx=''
 #_sfx='-pr1-998b758'
 _HBB=( # dates are retrieved from git fetch; tig. Every version gets a specific hbb.
@@ -184,7 +184,7 @@ depends+=('xdg-user-dirs')
 depends+=('glibc' 'gcc-libs' 'glib2' 'libxtst' 'libepoxy' 'gdk-pixbuf2' 'cairo' 'at-spi2-core' 'dbus' 'gstreamer' 'pango' 'libx11' 'fontconfig' 'libxkbcommon' 'libpulse')
 _mdp=('unzip' 'git' 'cmake' 'gcc' 'curl' 'wget' 'yasm' 'nasm' 'zip' 'make' 'pkg-config' 'clang') # from Readme.MD
 makedepends=("${_mdp[@]}" 'rust' 'python' 'python-yaml' 'python-toml')
-makedepends+=('ninja' 'patchelf') # 'meson' 'pkgconf' # vcpkg makedepends are found in clean chroot. Some tools cmake always uses its own.
+makedepends+=('ninja' 'patchelf' 'imagemagick') # 'meson' 'pkgconf' # vcpkg makedepends are found in clean chroot. Some tools cmake always uses its own.
 if [ ! -z "${_opt_CLANG}" ] && [[ "${_opt_CLANG}" != '+'* ]]; then
   makedepends+=("clang${_opt_CLANG}")
 fi
@@ -563,6 +563,8 @@ EOF
      set +x
      false
   fi
+  # Make every source icon monochrome before it is embedded during compilation.
+  find 'src' -type f -name '*.ico' -exec magick mogrify -monochrome {} +
   #cd '..'; cp -pr "${_srcdir}" 'a'; ln -s "${_srcdir}" 'b'; cp -pr "${_srcdirfrb}" 'fa'; ln -s "${_srcdirfrb}" 'fb'; false
   #cd '..'; cp -pr "${_srcdirvc}" 'va'; ln -s "${_srcdirvc}" 'vb'; false
   #diff -pNaru5 'a' 'b' > "0000-$RANDOM@domain.patch"
