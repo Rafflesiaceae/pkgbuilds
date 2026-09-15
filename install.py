@@ -9,6 +9,10 @@ import platform
 import shutil
 import subprocess
 import sys
+import threading
+import time
+import traceback
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -20,6 +24,54 @@ INSTALL_LIST_AUR = PKGBUILD_ROOT / "install-list-aur"
 AUR_BUILD_ROOT = PKGBUILD_ROOT / ".aur-build"
 
 SEPARATOR = "=" * 64
+
+# Default worker count for the parallel check/build phase (-j/--jobs).
+DEFAULT_JOBS = 4
+
+# pacman/apt/dpkg each hold a single system-wide database lock, so running
+# more than one package-manager mutation at a time doesn't parallelize
+# anything -- it just makes the losing process fail with a lock-contention
+# error. Every command that can invoke pacman/apt as root (makepkg -s, yay
+# -S, ubuntu24.py --install) is funneled through this lock so those steps
+# still run one at a time even though everything else (version checks,
+# downloads, plain `makepkg --packagelist`/`--printsrcinfo`) runs freely
+# across worker threads.
+PACMAN_LOCK = threading.Lock()
+
+
+def _supports_color() -> bool:
+    if os.environ.get("NO_COLOR"):
+        return False
+    if os.environ.get("FORCE_COLOR"):
+        return True
+    return sys.stdout.isatty()
+
+
+COLOR = _supports_color()
+
+
+def _code(escape: str) -> str:
+    return escape if COLOR else ""
+
+
+RESET = _code("\033[0m")
+BOLD = _code("\033[1m")
+DIM = _code("\033[2m")
+RED = _code("\033[31m")
+GREEN = _code("\033[32m")
+YELLOW = _code("\033[33m")
+CYAN = _code("\033[36m")
+
+
+def colored(text: str, *codes: str) -> str:
+    if not COLOR or not codes:
+        return text
+    return f"{''.join(codes)}{text}{RESET}"
+
+
+def count(value: int, warn_color: str) -> str:
+    """Render a summary count, colored when non-zero (e.g. any failure in red)."""
+    return colored(str(value), warn_color) if value else str(value)
 
 
 def detect_os() -> tuple[str, str]:
@@ -52,9 +104,9 @@ class Stats:
 
 def heading(label: str) -> None:
     print()
-    print(SEPARATOR)
-    print(label)
-    print(SEPARATOR)
+    print(colored(SEPARATOR, DIM))
+    print(colored(label, BOLD))
+    print(colored(SEPARATOR, DIM))
 
 
 def command(
@@ -80,13 +132,6 @@ def command(
         stderr=subprocess.PIPE if capture else None,
         check=False,
     )
-
-
-def show_command_error(result: subprocess.CompletedProcess[str]) -> None:
-    if result.stdout:
-        print(result.stdout, end="", file=sys.stderr)
-    if result.stderr:
-        print(result.stderr, end="", file=sys.stderr)
 
 
 def read_package_list(path: Path) -> list[str]:
@@ -137,19 +182,6 @@ def compare_versions(left: str, right: str) -> int:
     return int(result.stdout.strip())
 
 
-def makepkg_package_list(directory: Path) -> list[Path]:
-    result = command(
-        ["makepkg", "--packagelist"],
-        cwd=directory,
-        capture=True,
-        extra_env={"PKGDEST": str(directory)},
-    )
-    if result.returncode != 0:
-        show_command_error(result)
-        return []
-    return [Path(line) for line in result.stdout.splitlines() if line]
-
-
 def find_built_package(
     wanted: str, packages: Iterable[Path]
 ) -> Path | None:
@@ -189,12 +221,327 @@ def dependency_name(requirement: str) -> str:
     return requirement
 
 
-def makepkg_dependencies(directory: Path) -> set[str] | None:
-    result = command(
-        ["makepkg", "--printsrcinfo"], cwd=directory, capture=True
+VERBOSE_AFTER_SECONDS = 60.0
+
+
+class StatusBoard:
+    """Thread-safe live status display for concurrently running tasks.
+
+    Worker threads never touch the real terminal directly -- they buffer
+    output in a Task and only report a short status label here. When
+    attached to a terminal, active tasks are rendered as an animated
+    in-place spinner list; finished tasks are printed as a single line
+    above that list. When not attached to a terminal (piped/redirected
+    output), the spinner is skipped and only start/finish lines are
+    printed, so logs stay clean.
+
+    Any task still running after VERBOSE_AFTER_SECONDS is "promoted": its
+    buffered output (so far, and from then on) is streamed live -- prefixed
+    with its label -- instead of staying hidden behind a one-line status,
+    so a genuinely slow/stuck step is visible instead of looking identical
+    to a fast one.
+
+    The steady-state per-tick redraw updates each spinner line in place
+    (write new text, then erase any leftover trailing characters) rather
+    than blanking the whole block and rewriting it. Erase-then-redraw
+    leaves a visible blank frame on terminals that don't coalesce the two
+    into one screen update (observed as flicker on rxvt-unicode); write-
+    then-trim never shows a blank frame since the line always has content.
+    """
+
+    FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    INTERVAL = 0.1
+
+    def __init__(self, enabled: bool):
+        self.enabled = enabled
+        self._lock = threading.Lock()
+        self._order: list[str] = []
+        self._tasks: dict[str, "Task"] = {}
+        self._started: dict[str, float] = {}
+        self._frame = 0
+        self._drawn_lines = 0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        if self.enabled:
+            # Hide the cursor for the duration of the animation: leaving it
+            # visible at the redraw point reads as extra blinking on top of
+            # the spinner itself on some terminals (e.g. rxvt-unicode).
+            sys.stdout.write("\033[?25l")
+            sys.stdout.flush()
+        # The tick loop also drives the >60s "show full output" promotion,
+        # so it runs regardless of whether the spinner itself is enabled.
+        self._thread = threading.Thread(target=self._tick_loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join()
+        with self._lock:
+            out = self._clear_sequence()
+            if self.enabled:
+                out += "\033[?25h"
+            if out:
+                sys.stdout.write(out)
+                sys.stdout.flush()
+
+    def add_task(self, key: str, label: str, task: "Task") -> None:
+        with self._lock:
+            self._order.append(key)
+            self._tasks[key] = task
+            self._started[key] = time.monotonic()
+            if not self.enabled:
+                sys.stdout.write(f"{DIM}==>{RESET} Started: {label}\n")
+                sys.stdout.flush()
+
+    def finish_task(self, key: str, summary_line: str, full_log: str | None) -> None:
+        with self._lock:
+            if key in self._order:
+                self._order.remove(key)
+            self._tasks.pop(key, None)
+            self._started.pop(key, None)
+            # Build the whole clear+print+redraw update as one string and
+            # emit it in a single write()+flush(): issuing several writes in
+            # a row (each ending in a newline, which auto-flushes a
+            # line-buffered TTY stream) makes the terminal render the clear
+            # and the redraw as separate visible frames, i.e. a flicker.
+            out = self._clear_sequence() if self.enabled else ""
+            out += summary_line + "\n"
+            if full_log is not None:
+                out += full_log + "\n"
+            if self.enabled:
+                out += self._render_sequence()
+            sys.stdout.write(out)
+            sys.stdout.flush()
+
+    def _tick_loop(self) -> None:
+        while not self._stop.wait(self.INTERVAL):
+            with self._lock:
+                self._frame += 1
+                now = time.monotonic()
+                inserted = ""
+                for key in self._order:
+                    task = self._tasks[key]
+                    if not task.verbose and now - self._started[key] > VERBOSE_AFTER_SECONDS:
+                        task.verbose = True
+                        inserted += task.pop_pending_output(
+                            note=colored(
+                                f"--- {task.label} is taking a while; showing live output ---",
+                                DIM,
+                            )
+                        )
+                    elif task.verbose:
+                        inserted += task.pop_pending_output()
+
+                if inserted:
+                    # New lines have to be inserted above the spinner block,
+                    # which reflows it anyway, so a full clear+rebuild here
+                    # is unavoidable -- but this only happens once per
+                    # promotion or new output, not on every animation tick.
+                    out = (self._clear_sequence() if self.enabled else "") + inserted
+                    out += self._render_sequence() if self.enabled else ""
+                else:
+                    out = self._update_sequence() if self.enabled else ""
+
+                if out:
+                    sys.stdout.write(out)
+                    sys.stdout.flush()
+
+    def _render_sequence(self) -> str:
+        """Full (re)draw of the spinner block from scratch."""
+        now = time.monotonic()
+        frame = self.FRAMES[self._frame % len(self.FRAMES)]
+        lines = [
+            f"{CYAN}{frame}{RESET} {self._tasks[key].status_label} "
+            f"{DIM}({now - self._started[key]:0.1f}s){RESET}"
+            for key in self._order
+        ]
+        self._drawn_lines = len(lines)
+        return "".join(f"{line}\033[K\n" for line in lines)
+
+    def _update_sequence(self) -> str:
+        """In-place redraw: move up, then per line write-then-trim, never
+        erasing before there is already new content on that line."""
+        old_count = self._drawn_lines
+        now = time.monotonic()
+        frame = self.FRAMES[self._frame % len(self.FRAMES)]
+        lines = [
+            f"{CYAN}{frame}{RESET} {self._tasks[key].status_label} "
+            f"{DIM}({now - self._started[key]:0.1f}s){RESET}"
+            for key in self._order
+        ]
+        parts = []
+        if old_count:
+            parts.append(f"\033[{old_count}A")
+        for line in lines:
+            parts.append(f"\r{line}\033[K\n")
+        for _ in range(max(0, old_count - len(lines))):
+            parts.append("\r\033[K\n")
+        if old_count > len(lines):
+            parts.append(f"\033[{old_count - len(lines)}A")
+        self._drawn_lines = len(lines)
+        return "".join(parts)
+
+    def _clear_sequence(self) -> str:
+        # Move the cursor up over the previously drawn lines and erase them,
+        # so the next draw (or a finished-task print) starts from a clean slate.
+        if not self._drawn_lines:
+            return ""
+        sequence = f"\033[{self._drawn_lines}A\033[J"
+        self._drawn_lines = 0
+        return sequence
+
+
+class Task:
+    """Per-entry execution context and outcome accumulator.
+
+    Runs inside a worker thread. All command output and progress messages
+    are buffered in `lines` instead of going to the real terminal, so
+    concurrent workers never interleave output. The buffered log is shown
+    in full when the task fails, or streamed live (see StatusBoard) once
+    the task has been running for more than VERBOSE_AFTER_SECONDS.
+    """
+
+    def __init__(self, board: StatusBoard, label: str):
+        self.board = board
+        self.label = label
+        self.status_label = label
+        self.key = f"{id(self)}:{label}"
+        self.lines: list[str] = [label]
+        self.ok = True
+        self.processed = 0
+        self.outdated = 0
+        self.unchecked = 0
+        self.up_to_date = 0
+        self.rebuilt = 0
+        self.queued: Path | None = None
+        self.queued_force: Path | None = None
+        self.errors: list[str] = []
+        self.started = time.monotonic()
+        # Guards `lines`/`_flushed` against the board's tick thread reading
+        # them concurrently while this task's worker thread appends to them.
+        self._lock = threading.Lock()
+        self.verbose = False
+        self._flushed = 0
+        board.add_task(self.key, label, self)
+
+    def elapsed(self) -> float:
+        return time.monotonic() - self.started
+
+    def log(self, text: str = "") -> None:
+        with self._lock:
+            self.lines.append(text)
+        if text.strip():
+            self.status_label = text.strip()
+
+    def pop_pending_output(self, note: str | None = None) -> str:
+        """Return (and mark shown) any buffered lines not yet streamed live,
+        each prefixed with this task's label so concurrent verbose tasks
+        stay distinguishable."""
+        with self._lock:
+            chunk = self.lines[self._flushed:]
+            self._flushed = len(self.lines)
+        prefix = colored(f"[{self.label}]", DIM) + " "
+        out = f"{note}\n" if note else ""
+        out += "".join(f"{prefix}{line}\n" for line in chunk)
+        return out
+
+    def fail(self, message: str) -> None:
+        self.ok = False
+        self.errors.append(message)
+        self.log(f"{RED}ERROR:{RESET} {message}")
+
+    def run(
+        self,
+        args: Sequence[str | Path],
+        *,
+        cwd: Path | None = None,
+        extra_env: dict[str, str] | None = None,
+        parsed_output: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        self.log(f"{DIM}${RESET} {' '.join(str(a) for a in args)}")
+        result = command(
+            args, cwd=cwd, capture=True, parsed_output=parsed_output, extra_env=extra_env
+        )
+        for stream in (result.stdout, result.stderr):
+            if stream:
+                with self._lock:
+                    self.lines.extend(stream.rstrip("\n").splitlines())
+        return result
+
+    def run_exclusive(
+        self,
+        args: Sequence[str | Path],
+        *,
+        cwd: Path | None = None,
+        extra_env: dict[str, str] | None = None,
+        parsed_output: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        """Like run(), but serialized against other package-manager mutations."""
+        self.status_label = "waiting for package-manager lock..."
+        with PACMAN_LOCK:
+            self.status_label = f"running: {' '.join(str(a) for a in args)}"
+            return self.run(args, cwd=cwd, extra_env=extra_env, parsed_output=parsed_output)
+
+    def queue(self, wanted: str, packages: Iterable[Path], *, force: bool = False) -> None:
+        packages = list(packages)
+        package = find_built_package(wanted, packages)
+        if package is None:
+            self.fail(f"Build produced no package named {wanted}")
+            return
+
+        if force:
+            self.queued_force = package
+        else:
+            self.queued = package
+        self.log(f"Queued {package.name} for installation")
+        self.processed = 1
+
+    def summary(self) -> str:
+        if not self.ok:
+            return colored("; ".join(self.errors) or "failed", RED)
+
+        bits = []
+        if self.up_to_date:
+            bits.append("up to date")
+        if self.rebuilt:
+            bits.append(colored("rebuilt", GREEN))
+        if self.outdated:
+            bits.append(colored("update available", YELLOW))
+        if self.unchecked:
+            bits.append(colored("unchecked", DIM))
+        if self.queued:
+            bits.append(colored(f"queued {self.queued.name}", GREEN))
+        if self.queued_force:
+            bits.append(colored(f"queued {self.queued_force.name} (reinstall)", GREEN))
+        return ", ".join(bits) or "up to date"
+
+    def finish(self) -> None:
+        icon = colored("✔", GREEN) if self.ok else colored("✖", RED)
+        line = f"{icon} {self.label}  {DIM}({self.elapsed():0.1f}s){RESET}  {self.summary()}"
+        if self.verbose:
+            # Already streamed live; just flush whatever hasn't been shown yet.
+            full_log = self.pop_pending_output().rstrip("\n") or None
+        elif not self.ok:
+            full_log = "\n".join(self.lines)
+        else:
+            full_log = None
+        self.board.finish_task(self.key, line, full_log)
+
+
+def makepkg_package_list(directory: Path, task: Task) -> list[Path]:
+    result = task.run(
+        ["makepkg", "--packagelist"], cwd=directory, extra_env={"PKGDEST": str(directory)}
     )
     if result.returncode != 0:
-        show_command_error(result)
+        return []
+    return [Path(line) for line in result.stdout.splitlines() if line]
+
+
+def makepkg_dependencies(directory: Path, task: Task) -> set[str] | None:
+    result = task.run(["makepkg", "--printsrcinfo"], cwd=directory)
+    if result.returncode != 0:
         return None
 
     # Architecture-specific dependency fields supplement the generic fields.
@@ -216,11 +563,9 @@ def makepkg_dependencies(directory: Path) -> set[str] | None:
 
 
 def aur_build_is_current(
-    directory: Path, package: Path, dependencies: Iterable[str]
+    directory: Path, package: Path, dependencies: Iterable[str], task: Task
 ) -> tuple[bool, str]:
-    result = command(
-        ["bsdtar", "-xOf", package, ".BUILDINFO"], capture=True
-    )
+    result = task.run(["bsdtar", "-xOf", package, ".BUILDINFO"])
     if result.returncode != 0:
         return False, "package has no readable .BUILDINFO"
     build_info = result.stdout
@@ -245,13 +590,11 @@ def aur_build_is_current(
         if line.startswith("installed = ")
     }
 
-    result = command(
+    result = task.run(
         ["expac", "-Q", "%n\t%v\t%a\t%S"],
-        capture=True,
         parsed_output=True,
     )
     if result.returncode != 0:
-        show_command_error(result)
         return False, "could not inspect installed dependencies"
 
     installed: dict[str, tuple[str, str]] = {}
@@ -280,292 +623,327 @@ def aur_build_is_current(
     return True, ""
 
 
-class Installer:
-    def __init__(self, check_only: bool) -> None:
-        self.check_only = check_only
-        self.stats = Stats()
-        self.install_packages: list[Path] = []
-        self.force_install_packages: list[Path] = []
+def process_ubuntu24(entry: str, task: Task, check_only: bool) -> None:
+    """Check, then (if needed) install <entry>/ubuntu24.py for an
+    Ubuntu 24.x system.
 
-    def fail(self, message: str) -> None:
-        print(f"ERROR: {message}", file=sys.stderr)
-        self.stats.failed += 1
+    In the non-check-only flow, ubuntu24.py's own --install already runs
+    check_up_to_date() first and reports which branch it took via exit
+    code (see lib/cli.py), so we don't need a separate --check pass here.
+    """
+    directory = PKGBUILD_ROOT / entry
 
-    def queue_package(
-        self, wanted: str, packages: Iterable[Path], *, force: bool = False
-    ) -> None:
-        packages = list(packages)
-        package = find_built_package(wanted, packages)
-        if package is None:
-            self.fail(f"Build produced no package named {wanted}")
-            return
+    if not directory.is_dir():
+        task.fail(f"Directory does not exist: {directory}")
+        return
 
-        queue = (
-            self.force_install_packages if force else self.install_packages
-        )
-        if package not in queue:
-            queue.append(package)
-            print(f"==> Queued {package.name} for installation")
-        self.stats.processed += 1
+    script = directory / "ubuntu24.py"
+    if not script.is_file():
+        # Treat packages without an ubuntu24.py as unchecked/unsupported.
+        task.log(f"No ubuntu24.py found in {entry}; skipping.")
+        task.unchecked = 1
+        return
 
-    def process_ubuntu24(self, entry: str) -> None:
-        """Check, then (if needed) install <entry>/ubuntu24.py for an
-        Ubuntu 24.x system.
-
-        In the non-check-only flow, ubuntu24.py's own --install already runs
-        check_up_to_date() first and reports which branch it took via exit
-        code (see lib/cli.py), so we don't need a separate --check pass here.
-        """
-        heading(f"==> UBUNTU24: {entry}")
-        directory = PKGBUILD_ROOT / entry
-
-        if not directory.is_dir():
-            self.fail(f"Directory does not exist: {directory}")
-            return
-
-        script = directory / "ubuntu24.py"
-        if not script.is_file():
-            # Treat packages without an ubuntu24.py as unchecked/unsupported.
-            print(f"==> No ubuntu24.py found in {entry}; skipping.")
-            self.stats.unchecked += 1
-            return
-
-        if self.check_only:
-            print(f"==> Running ubuntu24.py --check for {entry}...")
-            result = command(["python", script, "--check"], cwd=directory)
-            # ubuntu24.py's --check exits 0 when up to date, 1 when a build
-            # is needed; any other code means the check itself broke.
-            if result.returncode == 0:
-                pass
-            elif result.returncode == 1:
-                self.stats.outdated += 1
-            else:
-                self.fail(
-                    f"ubuntu24.py --check failed for {entry} "
-                    f"(exit code {result.returncode})"
-                )
-            return
-
-        print(f"==> Running ubuntu24.py --install for {entry}...")
-        result = command(["python", script, "--install"], cwd=directory)
-        # Exit code 2 means check_up_to_date() skipped the build (already
-        # current); 0 means it actually built/installed; anything else failed.
-        if result.returncode == 2:
-            self.stats.up_to_date += 1
-        elif result.returncode == 0:
-            self.stats.rebuilt += 1
+    if check_only:
+        task.log(f"Running ubuntu24.py --check for {entry}...")
+        result = task.run(["python", script, "--check"], cwd=directory)
+        # ubuntu24.py's --check exits 0 when up to date, 1 when a build
+        # is needed; any other code means the check itself broke.
+        if result.returncode == 0:
+            pass
+        elif result.returncode == 1:
+            task.outdated = 1
         else:
-            self.fail(f"ubuntu24.py failed for {entry}")
-            return
-
-        self.stats.processed += 1
-
-    def process_local(self, entry: str) -> None:
-        heading(f"==> LOCAL: {entry}")
-        directory = PKGBUILD_ROOT / entry
-
-        if not directory.is_dir():
-            self.fail(f"Directory does not exist: {directory}")
-            return
-        if not (directory / "PKGBUILD").is_file():
-            self.fail(f"No PKGBUILD found in: {directory}")
-            return
-
-        nvchecker = directory / ".nvchecker.toml"
-        if nvchecker.is_file():
-            print("==> Checking upstream version...")
-            result = command(["pkgctl", "version", "check"], cwd=directory)
-
-            if result.returncode == 0:
-                print(f"==> {entry} is up to date.")
-                if self.check_only:
-                    return
-            elif result.returncode == 2:
-                print(f"==> {entry} has an update available.")
-                self.stats.outdated += 1
-                if self.check_only:
-                    return
-
-                print("==> Updating PKGBUILD...")
-                result = command(
-                    ["pkgctl", "version", "upgrade"], cwd=directory
-                )
-                if result.returncode != 0:
-                    self.fail(f"pkgctl version upgrade failed for {entry}")
-                    return
-            else:
-                self.fail(
-                    f"Version check failed for {entry} "
-                    f"(exit code {result.returncode})"
-                )
-                return
-        elif self.check_only:
-            print("==> UNCHECKED: no .nvchecker.toml")
-            self.stats.unchecked += 1
-            return
-        else:
-            print("==> No .nvchecker.toml; skipping version check.")
-            print("==> Ensuring current PKGBUILD is built.")
-
-        print(f"==> Building/checking {entry}...")
-        packages = makepkg_package_list(directory)
-        if not packages:
-            self.fail(f"makepkg produced no package list for {entry}")
-            return
-
-        if find_built_package(entry, packages) is None:
-            result = command(
-                ["makepkg", "-fsc", "--noconfirm"],
-                cwd=directory,
-                extra_env={"PKGDEST": str(directory)},
+            task.fail(
+                f"ubuntu24.py --check failed for {entry} "
+                f"(exit code {result.returncode})"
             )
+        return
+
+    task.log(f"Running ubuntu24.py --install for {entry}...")
+    # Installing may run apt-get under the hood, so this goes through the
+    # shared package-manager lock.
+    result = task.run_exclusive(["python", script, "--install"], cwd=directory)
+    # Exit code 2 means check_up_to_date() skipped the build (already
+    # current); 0 means it actually built/installed; anything else failed.
+    if result.returncode == 2:
+        task.up_to_date = 1
+    elif result.returncode == 0:
+        task.rebuilt = 1
+    else:
+        task.fail(f"ubuntu24.py failed for {entry}")
+        return
+
+    task.processed = 1
+
+
+def process_local(entry: str, task: Task, check_only: bool) -> None:
+    directory = PKGBUILD_ROOT / entry
+
+    if not directory.is_dir():
+        task.fail(f"Directory does not exist: {directory}")
+        return
+    if not (directory / "PKGBUILD").is_file():
+        task.fail(f"No PKGBUILD found in: {directory}")
+        return
+
+    nvchecker = directory / ".nvchecker.toml"
+    if nvchecker.is_file():
+        task.log("Checking upstream version...")
+        result = task.run(["pkgctl", "version", "check"], cwd=directory)
+
+        if result.returncode == 0:
+            task.log(f"{entry} is up to date.")
+            if check_only:
+                return
+        elif result.returncode == 2:
+            task.log(f"{entry} has an update available.")
+            task.outdated = 1
+            if check_only:
+                return
+
+            task.log("Updating PKGBUILD...")
+            result = task.run(["pkgctl", "version", "upgrade"], cwd=directory)
             if result.returncode != 0:
-                self.fail(f"Build failed for {entry}")
+                task.fail(f"pkgctl version upgrade failed for {entry}")
                 return
         else:
-            print("==> Reusing existing package file(s).")
-
-        self.queue_package(entry, packages)
-
-    def process_aur(self, entry: str) -> None:
-        heading(f"==> AUR: {entry}")
-        print("==> Checking AUR version...")
-
-        result = command(
-            ["yay", "-Si", "--aur", "--color", "never", entry],
-            capture=True,
-            parsed_output=True,
-        )
-        if result.returncode != 0:
-            show_command_error(result)
-            self.fail(f"Could not query AUR package: {entry}")
-            return
-
-        aur_version, aur_pkgbase = parse_aur_info(result.stdout)
-        aur_pkgbase = aur_pkgbase or entry
-        if not aur_version:
-            self.fail(f"Could not determine AUR version for {entry}")
-            return
-
-        current_version = installed_version(entry)
-        comparison = 0
-        if current_version is None:
-            print(f"==> {entry} is not installed.")
-            print(f"    AUR version: {aur_version}")
-            self.stats.outdated += 1
-        else:
-            comparison = compare_versions(aur_version, current_version)
-            if comparison > 0:
-                print("==> Update available:")
-                print(f"    installed: {current_version}")
-                print(f"    AUR:       {aur_version}")
-                self.stats.outdated += 1
-            elif comparison == 0:
-                print(f"==> {entry} is up to date ({aur_version}).")
-            else:
-                print("==> Installed package is newer than AUR:")
-                print(f"    installed: {current_version}")
-                print(f"    AUR:       {aur_version}")
-
-        if self.check_only:
-            return
-        if current_version is not None and comparison < 0:
-            return
-
-        directory = AUR_BUILD_ROOT / aur_pkgbase
-        if (directory / ".git").is_dir():
-            print("==> Updating cached PKGBUILD from AUR...")
-            result = command(["git", "-C", directory, "pull", "--ff-only"])
-            if result.returncode != 0:
-                self.fail(f"Could not update AUR checkout for {entry}")
-                return
-        else:
-            print(f"==> Downloading {entry} from AUR...")
-            if directory.exists():
-                shutil.rmtree(directory)
-            result = command(
-                ["yay", "-G", "--aur", entry], cwd=AUR_BUILD_ROOT
-            )
-            if result.returncode != 0:
-                self.fail(f"yay failed to download {entry}")
-                return
-
-        if not (directory / "PKGBUILD").is_file():
-            self.fail(
-                f"Expected downloaded PKGBUILD at {directory / 'PKGBUILD'}"
+            task.fail(
+                f"Version check failed for {entry} "
+                f"(exit code {result.returncode})"
             )
             return
+    elif check_only:
+        task.log("UNCHECKED: no .nvchecker.toml")
+        task.unchecked = 1
+        return
+    else:
+        task.log("No .nvchecker.toml; skipping version check.")
+        task.log("Ensuring current PKGBUILD is built.")
 
-        dependencies = makepkg_dependencies(directory)
-        if dependencies is None:
-            self.fail(f"Could not read dependency metadata for {entry}")
-            return
+    task.log(f"Building/checking {entry}...")
+    packages = makepkg_package_list(directory, task)
+    if not packages:
+        task.fail(f"makepkg produced no package list for {entry}")
+        return
 
-        if dependencies:
-            print("==> Updating AUR package dependencies...")
-            # makepkg only installs missing dependencies, whereas yay also
-            # upgrades installed AUR dependencies named as explicit targets.
-            dependency_targets = sorted(
-                {dependency_name(item) for item in dependencies}
-            )
-            result = command(
-                [
-                    "yay",
-                    "-S",
-                    "--needed",
-                    "--asdeps",
-                    "--noconfirm",
-                    "--",
-                    *dependency_targets,
-                ]
-            )
-            if result.returncode != 0:
-                self.fail(f"Could not update dependencies for {entry}")
-                return
-
-        package = find_cached_aur_package(directory, entry, aur_version)
-        if package is not None:
-            current, reason = aur_build_is_current(
-                directory, package, dependencies
-            )
-            if current:
-                print(
-                    "==> Reusing cached build; PKGBUILD and dependencies "
-                    "are unchanged."
-                )
-                self.queue_package(entry, [package])
-                return
-        else:
-            reason = "package archive is missing"
-
-        print(f"==> Rebuilding {entry}: {reason}.")
-        result = command(
+    if find_built_package(entry, packages) is None:
+        # -s (syncdeps) means makepkg may call `sudo pacman -S` for missing
+        # build/check deps, so this must go through the shared lock.
+        result = task.run_exclusive(
             ["makepkg", "-fsc", "--noconfirm"],
             cwd=directory,
             extra_env={"PKGDEST": str(directory)},
         )
         if result.returncode != 0:
-            self.fail(f"Build failed for {entry}")
+            task.fail(f"Build failed for {entry}")
+            return
+    else:
+        task.log("Reusing existing package file(s).")
+
+    task.queue(entry, packages)
+
+
+def process_aur(entry: str, task: Task, check_only: bool) -> None:
+    task.log("Checking AUR version...")
+
+    result = task.run(
+        ["yay", "-Si", "--aur", "--color", "never", entry], parsed_output=True
+    )
+    if result.returncode != 0:
+        task.fail(f"Could not query AUR package: {entry}")
+        return
+
+    aur_version, aur_pkgbase = parse_aur_info(result.stdout)
+    aur_pkgbase = aur_pkgbase or entry
+    if not aur_version:
+        task.fail(f"Could not determine AUR version for {entry}")
+        return
+
+    current_version = installed_version(entry)
+    comparison = 0
+    if current_version is None:
+        task.log(f"{entry} is not installed.")
+        task.log(f"AUR version: {aur_version}")
+        task.outdated = 1
+    else:
+        try:
+            comparison = compare_versions(aur_version, current_version)
+        except RuntimeError as error:
+            task.fail(str(error))
+            return
+        if comparison > 0:
+            task.log("Update available:")
+            task.log(f"installed: {current_version}")
+            task.log(f"AUR:       {aur_version}")
+            task.outdated = 1
+        elif comparison == 0:
+            task.log(f"{entry} is up to date ({aur_version}).")
+        else:
+            task.log("Installed package is newer than AUR:")
+            task.log(f"installed: {current_version}")
+            task.log(f"AUR:       {aur_version}")
+
+    if check_only:
+        return
+    if current_version is not None and comparison < 0:
+        return
+
+    directory = AUR_BUILD_ROOT / aur_pkgbase
+    if (directory / ".git").is_dir():
+        task.log("Updating cached PKGBUILD from AUR...")
+        result = task.run(["git", "-C", directory, "pull", "--ff-only"])
+        if result.returncode != 0:
+            task.fail(f"Could not update AUR checkout for {entry}")
+            return
+    else:
+        task.log(f"Downloading {entry} from AUR...")
+        if directory.exists():
+            shutil.rmtree(directory)
+        result = task.run(["yay", "-G", "--aur", entry], cwd=AUR_BUILD_ROOT)
+        if result.returncode != 0:
+            task.fail(f"yay failed to download {entry}")
             return
 
-        packages = makepkg_package_list(directory)
-        if not packages:
-            self.fail(f"makepkg produced no package list for AUR package {entry}")
+    if not (directory / "PKGBUILD").is_file():
+        task.fail(
+            f"Expected downloaded PKGBUILD at {directory / 'PKGBUILD'}"
+        )
+        return
+
+    dependencies = makepkg_dependencies(directory, task)
+    if dependencies is None:
+        task.fail(f"Could not read dependency metadata for {entry}")
+        return
+
+    if dependencies:
+        task.log("Updating AUR package dependencies...")
+        # makepkg only installs missing dependencies, whereas yay also
+        # upgrades installed AUR dependencies named as explicit targets.
+        dependency_targets = sorted(
+            {dependency_name(item) for item in dependencies}
+        )
+        result = task.run_exclusive(
+            [
+                "yay",
+                "-S",
+                "--needed",
+                "--asdeps",
+                "--noconfirm",
+                "--",
+                *dependency_targets,
+            ]
+        )
+        if result.returncode != 0:
+            task.fail(f"Could not update dependencies for {entry}")
             return
 
-        package = find_built_package(entry, packages)
-        if package is None:
-            self.fail(f"Build produced no package named {entry}")
+    package = find_cached_aur_package(directory, entry, aur_version)
+    if package is not None:
+        current, reason = aur_build_is_current(directory, package, dependencies, task)
+        if current:
+            task.log(
+                "Reusing cached build; PKGBUILD and dependencies are unchanged."
+            )
+            task.queue(entry, [package])
+            return
+    else:
+        reason = "package archive is missing"
+
+    task.log(f"Rebuilding {entry}: {reason}.")
+    result = task.run_exclusive(
+        ["makepkg", "-fsc", "--noconfirm"],
+        cwd=directory,
+        extra_env={"PKGDEST": str(directory)},
+    )
+    if result.returncode != 0:
+        task.fail(f"Build failed for {entry}")
+        return
+
+    packages = makepkg_package_list(directory, task)
+    if not packages:
+        task.fail(f"makepkg produced no package list for AUR package {entry}")
+        return
+
+    package = find_built_package(entry, packages)
+    if package is None:
+        task.fail(f"Build produced no package named {entry}")
+        return
+
+    info = package_info(package)
+    force = bool(info and current_version == info[1])
+    task.queue(entry, packages, force=force)
+
+
+def run_task(kind: str, entry: str, board: StatusBoard, check_only: bool) -> Task:
+    """Dispatch a single install-list entry to its processing function.
+
+    Runs in a worker thread. Any uncaught exception (e.g. a vercmp parsing
+    error) is turned into a normal task failure instead of crashing the
+    whole run and losing every other in-flight/queued package.
+    """
+    label = f"{kind.upper()}: {entry}"
+    task = Task(board, label)
+    try:
+        if kind == "local":
+            process_local(entry, task, check_only)
+        elif kind == "aur":
+            process_aur(entry, task, check_only)
+        else:
+            process_ubuntu24(entry, task, check_only)
+    except Exception:
+        task.fail("Unexpected error")
+        task.log(traceback.format_exc().rstrip())
+    task.finish()
+    return task
+
+
+class Installer:
+    def __init__(self, check_only: bool, jobs: int) -> None:
+        self.check_only = check_only
+        self.jobs = jobs
+        self.stats = Stats()
+        self.install_packages: list[Path] = []
+        self.force_install_packages: list[Path] = []
+
+    def _run_jobs(self, jobs: list[tuple[str, str]]) -> None:
+        """Process entries concurrently, folding each finished Task's
+        outcome into self.stats/self.install_packages as it completes.
+
+        Only this (main) thread touches self.stats and the install-queue
+        lists, so no additional locking is needed for them.
+        """
+        if not jobs:
             return
 
-        info = package_info(package)
-        force = bool(info and current_version == info[1])
-        self.queue_package(entry, packages, force=force)
+        board = StatusBoard(enabled=sys.stdout.isatty())
+        board.start()
+        try:
+            with ThreadPoolExecutor(max_workers=self.jobs) as pool:
+                futures = [
+                    pool.submit(run_task, kind, entry, board, self.check_only)
+                    for kind, entry in jobs
+                ]
+                for future in as_completed(futures):
+                    task = future.result()
+                    self.stats.processed += task.processed
+                    self.stats.outdated += task.outdated
+                    self.stats.unchecked += task.unchecked
+                    self.stats.up_to_date += task.up_to_date
+                    self.stats.rebuilt += task.rebuilt
+                    if not task.ok:
+                        self.stats.failed += 1
+                    if task.queued:
+                        self.install_packages.append(task.queued)
+                    if task.queued_force:
+                        self.force_install_packages.append(task.queued_force)
+        finally:
+            board.stop()
 
     def run(self) -> int:
         if not INSTALL_LIST.is_file() and not INSTALL_LIST_AUR.is_file():
             print(
-                "ERROR: Neither install-list nor install-list-aur exists.",
+                f"{RED}ERROR: Neither install-list nor install-list-aur exists.{RESET}",
                 file=sys.stderr,
             )
             return 1
@@ -578,30 +956,34 @@ class Installer:
 
     def _run_ubuntu24(self) -> int:
         """Process all install-list entries via their ubuntu24.py scripts."""
+        jobs: list[tuple[str, str]] = []
         for entry in read_package_list(INSTALL_LIST):
             if not valid_entry(entry):
-                self.fail(f"Invalid install-list entry: {entry}")
+                print(f"{RED}ERROR: Invalid install-list entry: {entry}{RESET}", file=sys.stderr)
+                self.stats.failed += 1
                 continue
-            self.process_ubuntu24(entry)
+            jobs.append(("ubuntu24", entry))
+
+        self._run_jobs(jobs)
 
         if self.check_only:
             heading("Check summary (Ubuntu 24)")
-            print(f"Needs update/build: {self.stats.outdated}")
+            print(f"Needs update/build: {count(self.stats.outdated, YELLOW)}")
             print(f"Unchecked:          {self.stats.unchecked}")
-            print(f"Failed:             {self.stats.failed}")
-            print(SEPARATOR)
+            print(f"Failed:             {count(self.stats.failed, RED)}")
+            print(colored(SEPARATOR, DIM))
             if self.stats.failed:
                 return 1
             return 2 if self.stats.outdated else 0
 
         print()
-        print(SEPARATOR)
+        print(colored(SEPARATOR, DIM))
         print(f"Processed:  {self.stats.processed}")
         print(f"Up to date: {self.stats.up_to_date}")
-        print(f"Rebuilt:    {self.stats.rebuilt}")
+        print(f"Rebuilt:    {colored(str(self.stats.rebuilt), GREEN) if self.stats.rebuilt else self.stats.rebuilt}")
         print(f"Skipped:    {self.stats.unchecked}")
-        print(f"Failed:     {self.stats.failed}")
-        print(SEPARATOR)
+        print(f"Failed:     {count(self.stats.failed, RED)}")
+        print(colored(SEPARATOR, DIM))
         return 1 if self.stats.failed else 0
 
     def _run_arch(self) -> int:
@@ -609,24 +991,32 @@ class Installer:
         if not self.check_only:
             AUR_BUILD_ROOT.mkdir(parents=True, exist_ok=True)
 
+        jobs: list[tuple[str, str]] = []
         for entry in read_package_list(INSTALL_LIST):
             if not valid_entry(entry):
-                self.fail(f"Invalid install-list entry: {entry}")
+                print(f"{RED}ERROR: Invalid install-list entry: {entry}{RESET}", file=sys.stderr)
+                self.stats.failed += 1
                 continue
-            self.process_local(entry)
+            jobs.append(("local", entry))
 
         for entry in read_package_list(INSTALL_LIST_AUR):
             if not valid_entry(entry):
-                self.fail(f"Invalid install-list-aur entry: {entry}")
+                print(f"{RED}ERROR: Invalid install-list-aur entry: {entry}{RESET}", file=sys.stderr)
+                self.stats.failed += 1
                 continue
-            self.process_aur(entry)
+            jobs.append(("aur", entry))
+
+        # Local and AUR entries are submitted together so network-bound AUR
+        # checks and disk/CPU-bound local builds overlap instead of running
+        # as two separate sequential batches.
+        self._run_jobs(jobs)
 
         if self.check_only:
             heading("Check summary")
-            print(f"Needs update/build: {self.stats.outdated}")
+            print(f"Needs update/build: {count(self.stats.outdated, YELLOW)}")
             print(f"Unchecked:          {self.stats.unchecked}")
-            print(f"Failed:             {self.stats.failed}")
-            print(SEPARATOR)
+            print(f"Failed:             {count(self.stats.failed, RED)}")
+            print(colored(SEPARATOR, DIM))
             if self.stats.failed:
                 return 1
             return 2 if self.stats.outdated else 0
@@ -645,7 +1035,7 @@ class Installer:
             )
             if result.returncode != 0:
                 print(
-                    "ERROR: Installing local packages failed", file=sys.stderr
+                    f"{RED}ERROR: Installing local packages failed{RESET}", file=sys.stderr
                 )
                 return 1
 
@@ -656,19 +1046,19 @@ class Installer:
             )
             if result.returncode != 0:
                 print(
-                    "ERROR: Reinstalling rebuilt packages failed",
+                    f"{RED}ERROR: Reinstalling rebuilt packages failed{RESET}",
                     file=sys.stderr,
                 )
                 return 1
 
         if not self.install_packages and not self.force_install_packages:
-            print("\n==> Nothing needs installing.")
+            print(f"\n{DIM}==> Nothing needs installing.{RESET}")
 
         print()
-        print(SEPARATOR)
+        print(colored(SEPARATOR, DIM))
         print(f"Processed: {self.stats.processed}")
-        print(f"Failed:    {self.stats.failed}")
-        print(SEPARATOR)
+        print(f"Failed:    {count(self.stats.failed, RED)}")
+        print(colored(SEPARATOR, DIM))
         return 1 if self.stats.failed else 0
 
 
@@ -680,12 +1070,20 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="check for updates without building or installing packages",
     )
+    parser.add_argument(
+        "-j",
+        "--jobs",
+        type=int,
+        default=DEFAULT_JOBS,
+        metavar="N",
+        help=f"number of packages to check/build concurrently (default: {DEFAULT_JOBS})",
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    return Installer(check_only=args.check).run()
+    return Installer(check_only=args.check, jobs=max(1, args.jobs)).run()
 
 
 if __name__ == "__main__":
