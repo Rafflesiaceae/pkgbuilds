@@ -1,0 +1,17 @@
+diff -pNaru5 a/src/platform/linux.rs b/src/platform/linux.rs
+--- a/src/platform/linux.rs	2026-09-15 14:30:00.000000000 +0200
++++ b/src/platform/linux.rs	2026-09-15 14:30:00.000000000 +0200
+@@ -1903,11 +1903,13 @@ mod desktop {
+ 
+         pub fn refresh(&mut self) {
+             if !self.sid.is_empty() && is_active_and_seat0(&self.sid) {
+                 // Xwayland display and xauth may not be available in a short time after login.
+-                if is_xwayland_running() && !self.is_login_wayland() {
++                // Avoid repeatedly spawning pgrep on X11 sessions, where Xwayland
++                // discovery cannot provide any useful session information.
++                if self.is_wayland() && is_xwayland_running() && !self.is_login_wayland() {
+                     self.get_display_xauth_xwayland();
+                     self.is_rustdesk_subprocess = false;
+                 } else if self.is_wayland() {
+                     self.get_display_xauth_wayland();
+                 }
