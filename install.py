@@ -136,6 +136,28 @@ def command(
     )
 
 
+def notify_sudo_prompt(context: str) -> None:
+    """Best-effort desktop alert before an operation may prompt via sudo."""
+    try:
+        subprocess.run(
+            [
+                "notify-send",
+                "--app-name=install.py",
+                "--urgency=critical",
+                "--icon=dialog-password",
+                "Sudo authentication may be required",
+                f"{context} may be waiting for your password in the terminal.",
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=5,
+        )
+    # A missing or unresponsive notification service must not break installs.
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def read_package_list(path: Path) -> list[str]:
     if not path.is_file():
         return []
@@ -576,6 +598,7 @@ class Task:
         self.status_label = "waiting for package-manager lock..."
         with PACMAN_LOCK:
             self.status_label = f"running: {' '.join(str(a) for a in args)}"
+            notified = False
             if sys.stdin.isatty():
                 # A non-interactive probe avoids disturbing an already valid
                 # sudo timestamp. When it fails, run the real validation with
@@ -583,6 +606,8 @@ class Task:
                 # password prompt remains visible and usable.
                 auth = command(["sudo", "-n", "-v"], capture=True)
                 if auth.returncode != 0:
+                    notify_sudo_prompt(self.label)
+                    notified = True
                     self.board.suspend()
                     try:
                         auth = command(["sudo", "-v"])
@@ -590,6 +615,10 @@ class Task:
                         self.board.resume()
                     if auth.returncode != 0:
                         return auth
+            if not notified:
+                # Commands such as makepkg can start another sudo process even
+                # after the validation above succeeded, so alert before launch.
+                notify_sudo_prompt(self.label)
             return self.run(args, cwd=cwd, extra_env=extra_env, parsed_output=parsed_output)
 
     def queue(self, wanted: str, packages: Iterable[Path], *, force: bool = False) -> None:
@@ -1173,6 +1202,7 @@ class Installer:
 
         if self.install_packages:
             heading("==> Installing requested local packages")
+            notify_sudo_prompt("Installing requested local packages")
             result = command(
                 [
                     "sudo",
@@ -1191,6 +1221,7 @@ class Installer:
 
         if self.force_install_packages:
             heading("==> Reinstalling rebuilt packages")
+            notify_sudo_prompt("Reinstalling rebuilt packages")
             result = command(
                 ["sudo", "pacman", "-U", "--", *self.force_install_packages]
             )

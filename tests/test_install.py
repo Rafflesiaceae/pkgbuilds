@@ -85,6 +85,7 @@ class InteractiveSudoTest(unittest.TestCase):
 
         with (
             patch.object(install, "command", side_effect=command_results) as command,
+            patch.object(install, "notify_sudo_prompt") as notify,
             patch.object(sys.stdin, "isatty", return_value=True),
             patch.object(sys, "stdout", output),
         ):
@@ -93,8 +94,46 @@ class InteractiveSudoTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(command.call_args_list[0].args[0], ["sudo", "-n", "-v"])
         self.assertEqual(command.call_args_list[1].args[0], ["sudo", "-v"])
+        notify.assert_called_once_with("LOCAL: example")
         self.assertIn("\033[?25h", output.getvalue())
         self.assertIn("\033[?25l", output.getvalue())
+
+    def test_valid_sudo_timestamp_still_notifies_before_nested_sudo(self) -> None:
+        board = install.StatusBoard(enabled=False)
+        command_results = [
+            subprocess.CompletedProcess(["sudo", "-n", "-v"], 0, "", ""),
+            subprocess.CompletedProcess(["makepkg"], 0, "", ""),
+        ]
+        output = io.StringIO()
+
+        with (
+            patch.object(install, "command", side_effect=command_results),
+            patch.object(install, "notify_sudo_prompt") as notify,
+            patch.object(sys.stdin, "isatty", return_value=True),
+            patch.object(sys, "stdout", output),
+        ):
+            task = install.Task(board, "LOCAL: example")
+            result = task.run_exclusive(["makepkg"])
+
+        self.assertEqual(result.returncode, 0)
+        notify.assert_called_once_with("LOCAL: example")
+
+    def test_sudo_notification_uses_notify_send(self) -> None:
+        with patch.object(install.subprocess, "run") as run:
+            install.notify_sudo_prompt("LOCAL: example")
+
+        arguments = run.call_args.args[0]
+        self.assertEqual(arguments[0], "notify-send")
+        self.assertIn("--urgency=critical", arguments)
+        self.assertIn("LOCAL: example", arguments[-1])
+
+    def test_sudo_notification_failure_does_not_break_install(self) -> None:
+        with patch.object(
+            install.subprocess,
+            "run",
+            side_effect=FileNotFoundError("notify-send"),
+        ):
+            install.notify_sudo_prompt("LOCAL: example")
 
 
 class InstallerSummaryTest(unittest.TestCase):
