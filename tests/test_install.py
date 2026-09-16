@@ -14,6 +14,11 @@ from unittest.mock import patch
 import install
 
 
+class TtyOutput(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
 class StatusBoardTest(unittest.TestCase):
     def setUp(self) -> None:
         self.board = install.StatusBoard(enabled=True)
@@ -241,6 +246,70 @@ class InstallerSummaryTest(unittest.TestCase):
             output.getvalue(),
             "Failed entries:\n  AUR: alpha\n  LOCAL: zeta\n",
         )
+
+
+class InstallerProgressTest(unittest.TestCase):
+    def test_explicit_single_target_hides_progress(self) -> None:
+        installer = install.Installer(check_only=True, jobs=1, target="example")
+
+        def finish_job(kind, entry, board, check_only, force):
+            task = install.Task(board, f"{kind.upper()}: {entry}")
+            task.finish()
+            return task
+
+        for output in (TtyOutput(), io.StringIO()):
+            with self.subTest(isatty=output.isatty()):
+                with (
+                    patch.object(sys, "stdout", output),
+                    patch.object(install, "run_task", side_effect=finish_job),
+                ):
+                    installer._run_jobs([("local", "example")])
+
+                self.assertEqual(output.getvalue(), "")
+
+    def test_explicit_single_target_still_shows_failures(self) -> None:
+        installer = install.Installer(check_only=True, jobs=1, target="example")
+        output = TtyOutput()
+
+        def fail_job(kind, entry, board, check_only, force):
+            task = install.Task(board, f"{kind.upper()}: {entry}")
+            task.fail("build failed")
+            task.finish()
+            return task
+
+        with (
+            patch.object(sys, "stdout", output),
+            patch.object(install, "run_task", side_effect=fail_job),
+        ):
+            installer._run_jobs([("local", "example")])
+
+        self.assertIn("build failed", output.getvalue())
+        self.assertNotIn("Started:", output.getvalue())
+        self.assertNotIn("\033[?25l", output.getvalue())
+        self.assertEqual(installer.stats.failed, 1)
+
+    def test_implicit_or_multiple_targets_keep_progress(self) -> None:
+        for target, jobs in (
+            (None, [("local", "example")]),
+            (["example", "other"], [("local", "example"), ("local", "other")]),
+        ):
+            with self.subTest(target=target):
+                installer = install.Installer(check_only=True, jobs=2, target=target)
+                output = TtyOutput()
+
+                def finish_job(kind, entry, board, check_only, force):
+                    task = install.Task(board, f"{kind.upper()}: {entry}")
+                    task.finish()
+                    return task
+
+                with (
+                    patch.object(sys, "stdout", output),
+                    patch.object(install, "run_task", side_effect=finish_job),
+                ):
+                    installer._run_jobs(jobs)
+
+                self.assertIn("\033[?25l", output.getvalue())
+                self.assertIn("LOCAL: example", output.getvalue())
 
 
 class InstallerTargetTest(unittest.TestCase):

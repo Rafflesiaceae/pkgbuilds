@@ -342,7 +342,9 @@ class StatusBoard:
     trailing spinner line; finished tasks are printed as a normal line
     that scrolls up, after which the spinner line is redrawn below it.
     When not attached to a terminal (piped/redirected output), the
-    spinner is skipped and only start/finish lines are printed.
+    spinner is skipped and only start/finish lines are printed. A single
+    explicitly requested target suppresses progress entirely, while its
+    failure details remain visible.
 
     Deliberately a *single* status line rather than one line per task:
     an earlier version moved the cursor up over a multi-line block with
@@ -365,8 +367,9 @@ class StatusBoard:
     FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
     INTERVAL = 0.1
 
-    def __init__(self, enabled: bool):
-        self.enabled = enabled
+    def __init__(self, enabled: bool, show_progress: bool = True):
+        self.show_progress = show_progress
+        self.enabled = enabled and show_progress
         self._lock = threading.Lock()
         self._order: list[str] = []
         self._tasks: dict[str, "Task"] = {}
@@ -378,6 +381,10 @@ class StatusBoard:
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
+        if not self.show_progress:
+            # Quiet single-target runs still collect logs for failures, but
+            # have no animation or delayed progress output to drive.
+            return
         if self.enabled:
             # Hide the cursor for the duration of the animation: leaving it
             # visible at the redraw point reads as extra blinking on top of
@@ -391,7 +398,8 @@ class StatusBoard:
 
     def stop(self) -> None:
         self._stop.set()
-        self._thread.join()
+        if self._thread is not None:
+            self._thread.join()
         with self._lock:
             out = self._clear_line()
             if self.enabled:
@@ -404,7 +412,7 @@ class StatusBoard:
         with self._lock:
             self._order.append(key)
             self._tasks[key] = task
-            if not self.enabled:
+            if self.show_progress and not self.enabled:
                 sys.stdout.write(f"{DIM}==>{RESET} Started: {label}\n")
                 sys.stdout.flush()
 
@@ -450,6 +458,8 @@ class StatusBoard:
             if key in self._order:
                 self._order.remove(key)
             self._tasks.pop(key, None)
+            if not self.show_progress and full_log is None:
+                return
             if self._suspended:
                 # `suspend()` already cleared the live line, so retain only
                 # the completed task output for `resume()` to print later.
@@ -1153,7 +1163,10 @@ class Installer:
         if not jobs:
             return
 
-        board = StatusBoard(enabled=sys.stdout.isatty())
+        # An explicit selection that resolves to one job needs no per-task
+        # progress; the final summary and any failure details still print.
+        show_progress = not self.targets or len(jobs) != 1
+        board = StatusBoard(enabled=sys.stdout.isatty(), show_progress=show_progress)
         board.start()
         try:
             with ThreadPoolExecutor(max_workers=self.jobs) as pool:
