@@ -828,8 +828,11 @@ def makepkg_dependencies(directory: Path, task: Task) -> set[str] | None:
     return dependencies
 
 
-def makepkg_build_command(keep_src: bool) -> list[str]:
-    """Build a package, optionally retaining makepkg's work directories."""
+def makepkg_build_command(keep_src: bool, continue_build: bool = False) -> list[str]:
+    """Build a package, optionally reusing its extracted source tree."""
+    if continue_build:
+        # Keep src intact so the next continued build can reuse it too.
+        return ["makepkg", "--noextract", "--force"]
     # makepkg's -c removes both src and pkg after a successful build.
     return ["makepkg", "-fs" if keep_src else "-fsc", "--noconfirm"]
 
@@ -981,6 +984,7 @@ def process_local(
     check_only: bool,
     force: bool = False,
     keep_src: bool = False,
+    continue_build: bool = False,
 ) -> None:
     directory = PKGBUILD_ROOT / entry
 
@@ -1031,12 +1035,12 @@ def process_local(
         task.fail(f"makepkg produced no package list for {entry}")
         return
 
-    # A forced run rebuilds even when makepkg's expected archive exists.
-    if force or find_built_package(entry, packages) is None:
+    # Continuing also rebuilds when makepkg's expected archive exists.
+    if force or continue_build or find_built_package(entry, packages) is None:
         # -s (syncdeps) means makepkg may call `sudo pacman -S` for missing
         # build/check deps, so this must go through the shared lock.
         result = task.run_exclusive(
-            makepkg_build_command(keep_src),
+            makepkg_build_command(keep_src, continue_build),
             cwd=directory,
             extra_env={"PKGDEST": str(directory)},
         )
@@ -1046,7 +1050,7 @@ def process_local(
     else:
         task.log("Reusing existing package file(s).")
 
-    task.queue(entry, packages, force=force)
+    task.queue(entry, packages, force=force or continue_build)
 
 
 def process_aur(
@@ -1055,6 +1059,7 @@ def process_aur(
     check_only: bool,
     force: bool = False,
     keep_src: bool = False,
+    continue_build: bool = False,
 ) -> None:
     task.log("Checking AUR version...")
 
@@ -1097,7 +1102,7 @@ def process_aur(
 
     if check_only:
         return
-    if not force and current_version is not None and comparison < 0:
+    if not (force or continue_build) and current_version is not None and comparison < 0:
         return
 
     directory = AUR_BUILD_ROOT / aur_pkgbase
@@ -1149,7 +1154,11 @@ def process_aur(
             task.fail(f"Could not update dependencies for {entry}")
             return
 
-    package = None if force else find_cached_aur_package(directory, entry, aur_version)
+    package = (
+        None
+        if force or continue_build
+        else find_cached_aur_package(directory, entry, aur_version)
+    )
     if package is not None:
         current, reason = aur_build_is_current(directory, package, dependencies, task)
         if current:
@@ -1158,14 +1167,14 @@ def process_aur(
             )
             task.queue(entry, [package])
             return
-    elif force:
-        reason = "forced rebuild"
+    elif force or continue_build:
+        reason = "continued rebuild" if continue_build else "forced rebuild"
     else:
         reason = "package archive is missing"
 
     task.log(f"Rebuilding {entry}: {reason}.")
     result = task.run_exclusive(
-        makepkg_build_command(keep_src),
+        makepkg_build_command(keep_src, continue_build),
         cwd=directory,
         extra_env={"PKGDEST": str(directory)},
     )
@@ -1184,7 +1193,7 @@ def process_aur(
         return
 
     info = package_info(package)
-    reinstall = force or bool(info and current_version == info[1])
+    reinstall = force or continue_build or bool(info and current_version == info[1])
     task.queue(entry, packages, force=reinstall)
 
 
@@ -1195,6 +1204,7 @@ def run_task(
     check_only: bool,
     force: bool = False,
     keep_src: bool = False,
+    continue_build: bool = False,
 ) -> Task:
     """Dispatch a single install-list entry to its processing function.
 
@@ -1206,9 +1216,9 @@ def run_task(
     task = Task(board, label)
     try:
         if kind == "local":
-            process_local(entry, task, check_only, force, keep_src)
+            process_local(entry, task, check_only, force, keep_src, continue_build)
         elif kind == "aur":
-            process_aur(entry, task, check_only, force, keep_src)
+            process_aur(entry, task, check_only, force, keep_src, continue_build)
         else:
             process_ubuntu24(entry, task, check_only, force)
     except Exception:
@@ -1226,12 +1236,14 @@ class Installer:
         target: str | Sequence[str] | None = None,
         force: bool = False,
         keep_src: bool = False,
+        continue_build: bool = False,
     ) -> None:
         self.check_only = check_only
         self.jobs = jobs
         self.targets = (target,) if isinstance(target, str) else tuple(target or ())
         self.force = force
         self.keep_src = keep_src
+        self.continue_build = continue_build
         self.stats = Stats()
         self.failed_entries: list[str] = []
         self.install_packages: list[Path] = []
@@ -1297,6 +1309,7 @@ class Installer:
                         self.check_only,
                         self.force,
                         self.keep_src,
+                        self.continue_build,
                     )
                     for kind, entry in jobs
                 ]
@@ -1502,6 +1515,13 @@ def parse_args() -> argparse.Namespace:
         help="rebuild and reinstall packages even when already current",
     )
     parser.add_argument(
+        "-n",
+        "--continue",
+        dest="continue_build",
+        action="store_true",
+        help="rebuild using already extracted sources with makepkg --noextract --force",
+    )
+    parser.add_argument(
         "-l",
         "--list",
         action="store_true",
@@ -1532,6 +1552,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--list cannot be combined with a target")
     if args.force and (args.check or args.list or args.clean):
         parser.error("--force cannot be combined with --check, --list, or --clean")
+    if args.continue_build and (args.check or args.list or args.clean):
+        parser.error("--continue cannot be combined with --check, --list, or --clean")
     if args.clean and (args.check or args.list):
         parser.error("--clean cannot be combined with --check or --list")
     if args.clean and args.keep_src:
@@ -1668,6 +1690,7 @@ def main() -> int:
         target=args.target,
         force=args.force,
         keep_src=args.keep_src,
+        continue_build=args.continue_build,
     ).run()
 
 
