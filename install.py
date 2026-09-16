@@ -8,6 +8,7 @@ import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -1348,6 +1349,35 @@ def list_targets() -> int:
     return 0
 
 
+def remove_build_directory(path: Path) -> None:
+    """Remove a build tree, repairing owner access or using sudo if needed."""
+    try:
+        shutil.rmtree(path)
+        return
+    except PermissionError:
+        # Some builds leave their work directory unreadable even to its owner.
+        # Restore owner access before asking for elevated privileges.
+        info = path.lstat()
+        mode = stat.S_IMODE(info.st_mode)
+        owner_mode = mode | 0o700
+        if (
+            stat.S_ISDIR(info.st_mode)
+            and info.st_uid == os.geteuid()
+            and owner_mode != mode
+        ):
+            try:
+                path.chmod(owner_mode)
+                shutil.rmtree(path)
+                return
+            except PermissionError:
+                pass
+
+    notify_sudo_prompt(f"Cleaning {path}")
+    result = command(["sudo", "rm", "-rf", "--", path])
+    if result.returncode != 0:
+        raise OSError(f"sudo rm failed with exit code {result.returncode}")
+
+
 def clean_build_directories(target: str | None) -> int:
     """Remove makepkg work directories while keeping package archives."""
     if target is not None and not valid_entry(target):
@@ -1396,7 +1426,7 @@ def clean_build_directories(target: str | None) -> int:
                         # Unlink a work-directory symlink without following it.
                         path.unlink()
                     elif path.is_dir():
-                        shutil.rmtree(path)
+                        remove_build_directory(path)
                     else:
                         continue
                 except OSError as error:

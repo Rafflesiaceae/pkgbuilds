@@ -468,6 +468,49 @@ class CleanBuildDirectoriesTest(unittest.TestCase):
         self.assertFalse((package / "src").is_symlink())
         self.assertTrue((external / "keep").exists())
 
+    def test_clean_repairs_owner_permissions_without_sudo(self) -> None:
+        package = self.package(self.root, "restricted")
+        workdir = package / "pkg"
+        workdir.chmod(0o111)
+        real_rmtree = shutil.rmtree
+
+        def remove(path):
+            if Path(path) == workdir and not workdir.stat().st_mode & 0o400:
+                raise PermissionError("owner cannot read pkg")
+            return real_rmtree(path)
+
+        with (
+            patch.object(install.shutil, "rmtree", side_effect=remove),
+            patch.object(install, "command") as command,
+            patch.object(sys, "stdout", io.StringIO()),
+        ):
+            result = install.clean_build_directories("restricted")
+
+        self.assertEqual(result, 0)
+        self.assertFalse(workdir.exists())
+        self.assertTrue((package / "restricted-1-1-x86_64.pkg.tar.zst").exists())
+        command.assert_not_called()
+
+    def test_clean_uses_sudo_only_for_a_permission_failure(self) -> None:
+        package = self.package(self.root, "root-owned")
+        shutil.rmtree(package / "src")
+        workdir = package / "pkg"
+        command_result = subprocess.CompletedProcess([], 1)
+
+        with (
+            patch.object(install.shutil, "rmtree", side_effect=PermissionError("denied")),
+            patch.object(install, "command", return_value=command_result) as command,
+            patch.object(install, "notify_sudo_prompt") as notify,
+            patch.object(sys, "stderr", io.StringIO()) as error,
+        ):
+            result = install.clean_build_directories("root-owned")
+
+        self.assertEqual(result, 1)
+        command.assert_called_once_with(["sudo", "rm", "-rf", "--", workdir])
+        notify.assert_called_once_with(f"Cleaning {workdir}")
+        self.assertIn("sudo rm failed with exit code 1", error.getvalue())
+        self.assertTrue(workdir.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
