@@ -177,6 +177,25 @@ _google_api_key=AIzaSyDwr302FpOSkGRpLlUpPThNTDPbXcIn_FM
 prepare() {
   # rustup install nightly
 
+  local _tree="chromium-$pkgver"
+
+  # A manual clone is not reextracted by makepkg, so preserve source edits and
+  # incremental build output on reruns. Older trees may not have the marker,
+  # but build.ninja shows that they reached the build step.
+  if (( _manual_clone )) &&
+     [[ -f $_tree/.makepkg-prepared || -f $_tree/out/Release/build.ninja ]]; then
+    printf 'Reusing prepared Chromium source tree: %s\n' "$_tree"
+    return 0
+  fi
+
+  # A partial prepare cannot safely be patched a second time. Leave it in
+  # place for inspection instead of silently building an incomplete tree.
+  if (( _manual_clone )) && [[ -e $_tree ]]; then
+    printf 'Existing Chromium source tree is not fully prepared: %s\n' "$_tree" >&2
+    printf 'Finish it manually, or use makepkg --cleanbuild for a fresh tree.\n' >&2
+    return 1
+  fi
+
   if (( _manual_clone )); then
     ./fetch-chromium-release $pkgver
   fi
@@ -309,6 +328,11 @@ prepare() {
     python3 build/util/lastchange.py -m DAWN_COMMIT_HASH \
       -s third_party/dawn --revision gpu/webgpu/DAWN_VERSION \
       --header gpu/webgpu/dawn_commit_hash.h
+  fi
+
+  # Mark a manual clone only after every preparation step succeeds.
+  if (( _manual_clone )); then
+    touch .makepkg-prepared
   fi
 }
 
