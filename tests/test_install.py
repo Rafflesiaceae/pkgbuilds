@@ -5,7 +5,9 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -369,6 +371,102 @@ class ListTargetsTest(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, 2)
         self.assertIn("--list cannot be combined with a target", error.getvalue())
+
+
+class CleanBuildDirectoriesTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.aur_root = self.root / ".aur-build"
+        root_patch = patch.object(install, "PKGBUILD_ROOT", self.root)
+        aur_patch = patch.object(install, "AUR_BUILD_ROOT", self.aur_root)
+        root_patch.start()
+        aur_patch.start()
+        self.addCleanup(root_patch.stop)
+        self.addCleanup(aur_patch.stop)
+
+    def package(self, parent: Path, name: str) -> Path:
+        directory = parent / name
+        directory.mkdir(parents=True)
+        (directory / "PKGBUILD").touch()
+        for workdir in ("src", "pkg"):
+            (directory / workdir).mkdir()
+            (directory / workdir / "build-output").touch()
+        (directory / f"{name}-1-1-x86_64.pkg.tar.zst").touch()
+        return directory
+
+    def test_clean_all_keeps_artifacts_and_unrelated_directories(self) -> None:
+        local = self.package(self.root, "local")
+        aur = self.package(self.aur_root, "aur")
+        unrelated = self.root / "unrelated" / "src"
+        unrelated.mkdir(parents=True)
+
+        with patch.object(sys, "stdout", io.StringIO()):
+            result = install.clean_build_directories(None)
+
+        self.assertEqual(result, 0)
+        for directory in (local, aur):
+            self.assertFalse((directory / "src").exists())
+            self.assertFalse((directory / "pkg").exists())
+            self.assertTrue(
+                (directory / f"{directory.name}-1-1-x86_64.pkg.tar.zst").exists()
+            )
+        self.assertTrue(unrelated.exists())
+
+    def test_target_cleans_only_matching_package(self) -> None:
+        selected = self.package(self.root, "selected")
+        other = self.package(self.root, "other")
+
+        with (
+            patch.object(sys, "argv", ["install.py", "--clean", "selected"]),
+            patch.object(install.Installer, "run") as installer_run,
+            patch.object(sys, "stdout", io.StringIO()),
+        ):
+            result = install.main()
+
+        self.assertEqual(result, 0)
+        self.assertFalse((selected / "src").exists())
+        self.assertFalse((selected / "pkg").exists())
+        self.assertTrue((other / "src").exists())
+        self.assertTrue((other / "pkg").exists())
+        installer_run.assert_not_called()
+
+    def test_aur_package_name_can_select_a_different_pkgbase(self) -> None:
+        aur = self.package(self.aur_root, "shared-base")
+        (aur / ".SRCINFO").write_text("pkgbase = shared-base\n\tpkgname = aur-name\n")
+
+        with patch.object(sys, "stdout", io.StringIO()):
+            result = install.clean_build_directories("aur-name")
+
+        self.assertEqual(result, 0)
+        self.assertFalse((aur / "src").exists())
+        self.assertFalse((aur / "pkg").exists())
+
+    def test_unknown_target_fails_without_removing_work(self) -> None:
+        package = self.package(self.root, "known")
+
+        with patch.object(sys, "stderr", io.StringIO()) as error:
+            result = install.clean_build_directories("missing")
+
+        self.assertEqual(result, 1)
+        self.assertIn("Target 'missing' was not found", error.getvalue())
+        self.assertTrue((package / "src").exists())
+
+    def test_work_directory_symlink_does_not_remove_its_target(self) -> None:
+        package = self.package(self.root, "linked")
+        external = self.root / "external"
+        external.mkdir()
+        (external / "keep").touch()
+        shutil.rmtree(package / "src")
+        (package / "src").symlink_to(external, target_is_directory=True)
+
+        with patch.object(sys, "stdout", io.StringIO()):
+            result = install.clean_build_directories("linked")
+
+        self.assertEqual(result, 0)
+        self.assertFalse((package / "src").is_symlink())
+        self.assertTrue((external / "keep").exists())
 
 
 if __name__ == "__main__":

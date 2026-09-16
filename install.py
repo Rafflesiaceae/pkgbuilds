@@ -1294,7 +1294,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "target",
         nargs="?",
-        help="process only this package entry",
+        help="process only this package entry (or package directory with --clean)",
     )
     parser.add_argument(
         "-c",
@@ -1309,6 +1309,11 @@ def parse_args() -> argparse.Namespace:
         help="list all available package targets and exit",
     )
     parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="remove src and pkg directories from package builds, keeping archives",
+    )
+    parser.add_argument(
         "-j",
         "--jobs",
         type=int,
@@ -1319,6 +1324,8 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.list and args.target is not None:
         parser.error("--list cannot be combined with a target")
+    if args.clean and (args.check or args.list):
+        parser.error("--clean cannot be combined with --check or --list")
     return args
 
 
@@ -1341,6 +1348,69 @@ def list_targets() -> int:
     return 0
 
 
+def clean_build_directories(target: str | None) -> int:
+    """Remove makepkg work directories while keeping package archives."""
+    if target is not None and not valid_entry(target):
+        print(f"{RED}ERROR: Invalid target: {target}{RESET}", file=sys.stderr)
+        return 1
+
+    # Scan package checkouts rather than install lists so inactive packages
+    # and cached AUR builds can be cleaned without changing configuration.
+    roots = [PKGBUILD_ROOT]
+    if AUR_BUILD_ROOT.is_dir() and not AUR_BUILD_ROOT.is_symlink():
+        roots.append(AUR_BUILD_ROOT)
+
+    matched = False
+    failed = False
+    for root in roots:
+        for directory in sorted(root.iterdir()):
+            if not directory.is_dir() or directory.is_symlink():
+                continue
+            if not (directory / "PKGBUILD").is_file() and not (
+                directory / "ubuntu24.py"
+            ).is_file():
+                continue
+
+            names = {directory.name}
+            srcinfo = directory / ".SRCINFO"
+            if (
+                target is not None
+                and target not in names
+                and root == AUR_BUILD_ROOT
+                and srcinfo.is_file()
+            ):
+                # Split AUR packages can have a pkgname different from pkgbase.
+                names.update(
+                    line.partition("=")[2].strip()
+                    for line in srcinfo.read_text().splitlines()
+                    if line.strip().startswith("pkgname =")
+                )
+            if target is not None and target not in names:
+                continue
+
+            matched = True
+            for name in ("src", "pkg"):
+                path = directory / name
+                try:
+                    if path.is_symlink():
+                        # Unlink a work-directory symlink without following it.
+                        path.unlink()
+                    elif path.is_dir():
+                        shutil.rmtree(path)
+                    else:
+                        continue
+                except OSError as error:
+                    print(f"{RED}ERROR: Could not remove {path}: {error}{RESET}", file=sys.stderr)
+                    failed = True
+                else:
+                    print(f"Removed {path}")
+
+    if target is not None and not matched:
+        print(f"{RED}ERROR: Target {target!r} was not found.{RESET}", file=sys.stderr)
+        return 1
+    return 1 if failed else 0
+
+
 def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == "--internal-sudo-wrapper":
         run_sudo_wrapper(sys.argv[2:])
@@ -1349,6 +1419,8 @@ def main() -> int:
     args = parse_args()
     if args.list:
         return list_targets()
+    if args.clean:
+        return clean_build_directories(args.target)
     return Installer(
         check_only=args.check,
         jobs=max(1, args.jobs),
