@@ -79,6 +79,42 @@ class StatusBoardTest(unittest.TestCase):
         self.assertIn("finished", output.getvalue())
 
 
+class CommandStreamingTest(unittest.TestCase):
+    def test_lines_arrive_before_exit_and_keep_streams_separate(self) -> None:
+        script = (
+            "import os, sys, time\n"
+            "print('ready')\n"
+            "deadline = time.monotonic() + 2\n"
+            "while not os.path.exists(sys.argv[1]) and time.monotonic() < deadline:\n"
+            "    time.sleep(0.01)\n"
+            "if not os.path.exists(sys.argv[1]):\n"
+            "    sys.exit(3)\n"
+            "print('result', flush=True)\n"
+            "print('warning', file=sys.stderr, flush=True)\n"
+        )
+        with tempfile.TemporaryDirectory() as root:
+            signal = Path(root) / "continue"
+            lines = []
+
+            def on_output(line):
+                lines.append(line)
+                if line == "ready":
+                    signal.touch()
+
+            result = install.command(
+                [sys.executable, "-c", script, signal],
+                capture=True,
+                parsed_output=True,
+                on_output=on_output,
+            )
+
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "ready\nresult\n")
+        self.assertEqual(result.stderr, "warning\n")
+        self.assertEqual(lines[0], "ready")
+        self.assertCountEqual(lines, ["ready", "result", "warning"])
+
+
 class InteractiveSudoTest(unittest.TestCase):
     def test_missing_sudo_timestamp_is_authenticated_outside_spinner(self) -> None:
         board = install.StatusBoard(enabled=True)
@@ -249,11 +285,13 @@ class InstallerSummaryTest(unittest.TestCase):
 
 
 class InstallerProgressTest(unittest.TestCase):
-    def test_explicit_single_target_hides_progress(self) -> None:
+    def test_explicit_single_target_streams_without_spinner(self) -> None:
         installer = install.Installer(check_only=True, jobs=1, target="example")
 
         def finish_job(kind, entry, board, check_only, force):
             task = install.Task(board, f"{kind.upper()}: {entry}")
+            task.log("Checking package...")
+            task.run([sys.executable, "-c", "print('subprocess line', flush=True)"])
             task.finish()
             return task
 
@@ -265,7 +303,13 @@ class InstallerProgressTest(unittest.TestCase):
                 ):
                     installer._run_jobs([("local", "example")])
 
-                self.assertEqual(output.getvalue(), "")
+                text = output.getvalue()
+                self.assertIn("Started: LOCAL: example", text)
+                self.assertLess(text.index("Checking package..."), text.index("subprocess line"))
+                self.assertEqual(text.splitlines().count("subprocess line"), 1)
+                self.assertIn("✔ LOCAL: example", text)
+                self.assertNotIn("\033[?25l", text)
+                self.assertNotIn(" running:", text)
 
     def test_explicit_single_target_still_shows_failures(self) -> None:
         installer = install.Installer(check_only=True, jobs=1, target="example")
@@ -273,6 +317,7 @@ class InstallerProgressTest(unittest.TestCase):
 
         def fail_job(kind, entry, board, check_only, force):
             task = install.Task(board, f"{kind.upper()}: {entry}")
+            task.log("unique diagnostic")
             task.fail("build failed")
             task.finish()
             return task
@@ -284,7 +329,7 @@ class InstallerProgressTest(unittest.TestCase):
             installer._run_jobs([("local", "example")])
 
         self.assertIn("build failed", output.getvalue())
-        self.assertNotIn("Started:", output.getvalue())
+        self.assertEqual(output.getvalue().count("unique diagnostic"), 1)
         self.assertNotIn("\033[?25l", output.getvalue())
         self.assertEqual(installer.stats.failed, 1)
 

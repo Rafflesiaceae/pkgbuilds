@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import os
 import platform
+import queue
 import re
 import shutil
 import stat
@@ -18,7 +19,7 @@ import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import IO, Callable, Iterable, Sequence
 
 
 PKGBUILD_ROOT = Path(__file__).resolve().parent
@@ -124,22 +125,76 @@ def command(
     capture: bool = False,
     parsed_output: bool = False,
     extra_env: dict[str, str] | None = None,
+    on_output: Callable[[str], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     if parsed_output:
         env["LC_ALL"] = "C"
     if extra_env:
         env.update(extra_env)
+    if on_output is not None:
+        # Python child installers otherwise buffer their progress behind the
+        # captured stdout pipe until they exit.
+        env.setdefault("PYTHONUNBUFFERED", "1")
 
-    return subprocess.run(
-        [str(arg) for arg in args],
+    argv = [str(arg) for arg in args]
+    if on_output is None:
+        return subprocess.run(
+            argv,
+            cwd=cwd,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE if capture else None,
+            stderr=subprocess.PIPE if capture else None,
+            check=False,
+        )
+
+    if not capture:
+        raise ValueError("Streaming command output requires capture=True")
+
+    # Drain both pipes concurrently so a noisy stderr cannot block stdout.
+    # Keep the streams separate for callers that parse command output.
+    events: queue.Queue[tuple[str, str | None]] = queue.Queue()
+
+    def read_lines(stream: IO[str], name: str) -> None:
+        try:
+            for line in stream:
+                events.put((name, line))
+        finally:
+            events.put((name, None))
+
+    with subprocess.Popen(
+        argv,
         cwd=cwd,
         env=env,
         text=True,
-        stdout=subprocess.PIPE if capture else None,
-        stderr=subprocess.PIPE if capture else None,
-        check=False,
-    )
+        bufsize=1,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    ) as process:
+        assert process.stdout is not None and process.stderr is not None
+        readers = [
+            threading.Thread(target=read_lines, args=(process.stdout, "stdout")),
+            threading.Thread(target=read_lines, args=(process.stderr, "stderr")),
+        ]
+        for reader in readers:
+            reader.start()
+
+        output: dict[str, list[str]] = {"stdout": [], "stderr": []}
+        remaining = len(readers)
+        while remaining:
+            name, line = events.get()
+            if line is None:
+                remaining -= 1
+                continue
+            output[name].append(line)
+            on_output(line.rstrip("\r\n"))
+
+        for reader in readers:
+            reader.join()
+        return subprocess.CompletedProcess(
+            argv, process.wait(), "".join(output["stdout"]), "".join(output["stderr"])
+        )
 
 
 def _send_sudo_notification(context: str) -> None:
@@ -336,15 +391,15 @@ def fit_terminal_line(text: str, columns: int) -> str:
 class StatusBoard:
     """Thread-safe live status display for concurrently running tasks.
 
-    Worker threads never touch the real terminal directly -- they buffer
-    output in a Task and only report a short status label here. When
-    attached to a terminal, active tasks are summarized on a single
-    trailing spinner line; finished tasks are printed as a normal line
-    that scrolls up, after which the spinner line is redrawn below it.
+    Concurrent workers buffer output in a Task and only report a short
+    status label here. When attached to a terminal, active tasks are
+    summarized on a single trailing spinner line; finished tasks are
+    printed as a normal line that scrolls up, after which the spinner
+    line is redrawn below it.
     When not attached to a terminal (piped/redirected output), the
     spinner is skipped and only start/finish lines are printed. A single
-    explicitly requested target suppresses progress entirely, while its
-    failure details remain visible.
+    explicitly requested target streams task output line by line without
+    animating a spinner.
 
     Deliberately a *single* status line rather than one line per task:
     an earlier version moved the cursor up over a multi-line block with
@@ -367,9 +422,9 @@ class StatusBoard:
     FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
     INTERVAL = 0.1
 
-    def __init__(self, enabled: bool, show_progress: bool = True):
-        self.show_progress = show_progress
-        self.enabled = enabled and show_progress
+    def __init__(self, enabled: bool, stream_output: bool = False):
+        self.stream_output = stream_output
+        self.enabled = enabled and not stream_output
         self._lock = threading.Lock()
         self._order: list[str] = []
         self._tasks: dict[str, "Task"] = {}
@@ -381,9 +436,9 @@ class StatusBoard:
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
-        if not self.show_progress:
-            # Quiet single-target runs still collect logs for failures, but
-            # have no animation or delayed progress output to drive.
+        if self.stream_output:
+            # Single-target output is written as it arrives, so there is no
+            # animation or delayed output promotion to drive.
             return
         if self.enabled:
             # Hide the cursor for the duration of the animation: leaving it
@@ -412,9 +467,17 @@ class StatusBoard:
         with self._lock:
             self._order.append(key)
             self._tasks[key] = task
-            if self.show_progress and not self.enabled:
+            if not self.enabled:
                 sys.stdout.write(f"{DIM}==>{RESET} Started: {label}\n")
                 sys.stdout.flush()
+
+    def task_output(self, text: str) -> None:
+        """Write one task line immediately in single-target mode."""
+        if not self.stream_output:
+            return
+        with self._lock:
+            sys.stdout.write(text + "\n")
+            sys.stdout.flush()
 
     def suspend(self) -> None:
         """Clear the spinner and expose the terminal for an interactive prompt."""
@@ -458,8 +521,6 @@ class StatusBoard:
             if key in self._order:
                 self._order.remove(key)
             self._tasks.pop(key, None)
-            if not self.show_progress and full_log is None:
-                return
             if self._suspended:
                 # `suspend()` already cleared the live line, so retain only
                 # the completed task output for `resume()` to print later.
@@ -565,11 +626,11 @@ class StatusBoard:
 class Task:
     """Per-entry execution context and outcome accumulator.
 
-    Runs inside a worker thread. All command output and progress messages
-    are buffered in `lines` instead of going to the real terminal, so
-    concurrent workers never interleave output. The buffered log is shown
-    in full when the task fails, or streamed live (see StatusBoard) once
-    the task has been running for more than VERBOSE_AFTER_SECONDS.
+    Runs inside a worker thread. Concurrent jobs buffer command output and
+    progress messages in `lines` so they never interleave. The buffered
+    log is shown in full on failure, or streamed live (see StatusBoard)
+    once the task has run longer than VERBOSE_AFTER_SECONDS. A single
+    explicitly requested target writes each line immediately.
     """
 
     def __init__(self, board: StatusBoard, label: str):
@@ -603,6 +664,7 @@ class Task:
             self.lines.append(text)
         if text.strip():
             self.status_label = text.strip()
+        self.board.task_output(text)
 
     def pop_pending_output(self, note: str | None = None) -> str:
         """Return (and mark shown) any buffered lines not yet streamed live,
@@ -631,12 +693,18 @@ class Task:
     ) -> subprocess.CompletedProcess[str]:
         self.log(f"{DIM}${RESET} {' '.join(str(a) for a in args)}")
         result = command(
-            args, cwd=cwd, capture=True, parsed_output=parsed_output, extra_env=extra_env
+            args,
+            cwd=cwd,
+            capture=True,
+            parsed_output=parsed_output,
+            extra_env=extra_env,
+            on_output=self.log if self.board.stream_output else None,
         )
-        for stream in (result.stdout, result.stderr):
-            if stream:
-                with self._lock:
-                    self.lines.extend(stream.rstrip("\n").splitlines())
+        if not self.board.stream_output:
+            for stream in (result.stdout, result.stderr):
+                if stream:
+                    with self._lock:
+                        self.lines.extend(stream.rstrip("\n").splitlines())
         return result
 
     def run_exclusive(
@@ -713,7 +781,10 @@ class Task:
     def finish(self) -> None:
         icon = colored("✔", GREEN) if self.ok else colored("✖", RED)
         line = f"{icon} {self.label}  {DIM}({self.elapsed():0.1f}s){RESET}  {self.summary()}"
-        if self.verbose:
+        if self.board.stream_output:
+            # Every line was already printed, including the failure details.
+            full_log = None
+        elif self.verbose:
             # Already streamed live; just flush whatever hasn't been shown yet.
             full_log = self.pop_pending_output().rstrip("\n") or None
         elif not self.ok:
@@ -1163,10 +1234,10 @@ class Installer:
         if not jobs:
             return
 
-        # An explicit selection that resolves to one job needs no per-task
-        # progress; the final summary and any failure details still print.
-        show_progress = not self.targets or len(jobs) != 1
-        board = StatusBoard(enabled=sys.stdout.isatty(), show_progress=show_progress)
+        # Stream a single explicitly requested job directly, without a
+        # spinner or the delay used for concurrent tasks.
+        stream_output = bool(self.targets) and len(jobs) == 1
+        board = StatusBoard(enabled=sys.stdout.isatty(), stream_output=stream_output)
         board.start()
         try:
             with ThreadPoolExecutor(max_workers=self.jobs) as pool:
