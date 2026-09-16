@@ -288,7 +288,7 @@ class InstallerProgressTest(unittest.TestCase):
     def test_explicit_single_target_streams_without_spinner(self) -> None:
         installer = install.Installer(check_only=True, jobs=1, target="example")
 
-        def finish_job(kind, entry, board, check_only, force):
+        def finish_job(kind, entry, board, check_only, force, keep_src):
             task = install.Task(board, f"{kind.upper()}: {entry}")
             task.log("Checking package...")
             task.run([sys.executable, "-c", "print('subprocess line', flush=True)"])
@@ -315,7 +315,7 @@ class InstallerProgressTest(unittest.TestCase):
         installer = install.Installer(check_only=True, jobs=1, target="example")
         output = TtyOutput()
 
-        def fail_job(kind, entry, board, check_only, force):
+        def fail_job(kind, entry, board, check_only, force, keep_src):
             task = install.Task(board, f"{kind.upper()}: {entry}")
             task.log("unique diagnostic")
             task.fail("build failed")
@@ -342,7 +342,7 @@ class InstallerProgressTest(unittest.TestCase):
                 installer = install.Installer(check_only=True, jobs=2, target=target)
                 output = TtyOutput()
 
-                def finish_job(kind, entry, board, check_only, force):
+                def finish_job(kind, entry, board, check_only, force, keep_src):
                     task = install.Task(board, f"{kind.upper()}: {entry}")
                     task.finish()
                     return task
@@ -606,6 +606,43 @@ class InstallerTargetTest(unittest.TestCase):
         )
         installer.return_value.run.assert_called_once_with()
 
+    def test_keep_src_flag_reaches_installer(self) -> None:
+        with (
+            patch.object(sys, "argv", ["install.py", "example", "--keep-src"]),
+            patch.object(install, "Installer") as installer,
+        ):
+            installer.return_value.run.return_value = 0
+            result = install.main()
+
+        self.assertEqual(result, 0)
+        self.assertTrue(installer.call_args.kwargs["keep_src"])
+        self.assertEqual(installer.call_args.kwargs["target"], ["example"])
+
+    def test_keep_src_is_passed_to_worker(self) -> None:
+        installer = install.Installer(check_only=False, jobs=1, keep_src=True)
+
+        with (
+            patch.object(install, "run_task") as run_task,
+            patch.object(sys, "stdout", io.StringIO()),
+        ):
+            run_task.return_value = install.Task(
+                install.StatusBoard(enabled=False), "LOCAL: example"
+            )
+            installer._run_jobs([("local", "example")])
+
+        self.assertTrue(run_task.call_args.args[-1])
+
+    def test_keep_src_cannot_be_combined_with_clean(self) -> None:
+        with (
+            patch.object(sys, "argv", ["install.py", "--keep-src", "--clean"]),
+            patch.object(sys, "stderr", io.StringIO()) as error,
+            self.assertRaises(SystemExit) as raised,
+        ):
+            install.parse_args()
+
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("--clean cannot be combined with --keep-src", error.getvalue())
+
     def test_force_option_can_appear_between_targets(self) -> None:
         with patch.object(
             sys, "argv", ["install.py", "local-one", "--force", "aur-one"]
@@ -662,6 +699,31 @@ class ForceInstallTest(unittest.TestCase):
             extra_env={"PKGDEST": str(directory)},
         )
 
+    def test_local_keep_src_omits_makepkg_cleanup(self) -> None:
+        directory = self.root / "example"
+        directory.mkdir()
+        (directory / "PKGBUILD").touch()
+        package = directory / "example-1-1-x86_64.pkg.tar.zst"
+
+        with (
+            patch.object(install, "PKGBUILD_ROOT", self.root),
+            patch.object(install, "makepkg_package_list", return_value=[package]),
+            patch.object(install, "find_built_package", side_effect=[None, package]),
+            patch.object(
+                self.task,
+                "run_exclusive",
+                return_value=subprocess.CompletedProcess([], 0),
+            ) as build,
+        ):
+            install.process_local("example", self.task, check_only=False, keep_src=True)
+
+        self.assertTrue(self.task.ok)
+        build.assert_called_once_with(
+            ["makepkg", "-fs", "--noconfirm"],
+            cwd=directory,
+            extra_env={"PKGDEST": str(directory)},
+        )
+
     def test_aur_force_bypasses_newer_installed_version_and_cached_build(self) -> None:
         aur_root = self.root / ".aur-build"
         directory = aur_root / "example"
@@ -698,6 +760,43 @@ class ForceInstallTest(unittest.TestCase):
         cached.assert_not_called()
         build.assert_called_once_with(
             ["makepkg", "-fsc", "--noconfirm"],
+            cwd=directory,
+            extra_env={"PKGDEST": str(directory)},
+        )
+
+    def test_aur_keep_src_omits_makepkg_cleanup(self) -> None:
+        aur_root = self.root / ".aur-build"
+        directory = aur_root / "example"
+        (directory / ".git").mkdir(parents=True)
+        (directory / "PKGBUILD").touch()
+        package = directory / "example-1-1-x86_64.pkg.tar.zst"
+
+        with (
+            patch.object(install, "AUR_BUILD_ROOT", aur_root),
+            patch.object(
+                self.task,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    [], 0, "Version: 1.0\nPackage Base: example\n", ""
+                ),
+            ),
+            patch.object(install, "installed_version", return_value=None),
+            patch.object(install, "makepkg_dependencies", return_value=set()),
+            patch.object(install, "find_cached_aur_package", return_value=None),
+            patch.object(install, "makepkg_package_list", return_value=[package]),
+            patch.object(install, "find_built_package", return_value=package),
+            patch.object(install, "package_info", return_value=("example", "1.0")),
+            patch.object(
+                self.task,
+                "run_exclusive",
+                return_value=subprocess.CompletedProcess([], 0),
+            ) as build,
+        ):
+            install.process_aur("example", self.task, check_only=False, keep_src=True)
+
+        self.assertTrue(self.task.ok)
+        build.assert_called_once_with(
+            ["makepkg", "-fs", "--noconfirm"],
             cwd=directory,
             extra_env={"PKGDEST": str(directory)},
         )

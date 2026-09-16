@@ -826,6 +826,12 @@ def makepkg_dependencies(directory: Path, task: Task) -> set[str] | None:
     return dependencies
 
 
+def makepkg_build_command(keep_src: bool) -> list[str]:
+    """Build a package, optionally retaining makepkg's work directories."""
+    # makepkg's -c removes both src and pkg after a successful build.
+    return ["makepkg", "-fs" if keep_src else "-fsc", "--noconfirm"]
+
+
 def aur_build_is_current(
     directory: Path, package: Path, dependencies: Iterable[str], task: Task
 ) -> tuple[bool, str]:
@@ -946,7 +952,11 @@ def process_ubuntu24(
 
 
 def process_local(
-    entry: str, task: Task, check_only: bool, force: bool = False
+    entry: str,
+    task: Task,
+    check_only: bool,
+    force: bool = False,
+    keep_src: bool = False,
 ) -> None:
     directory = PKGBUILD_ROOT / entry
 
@@ -1002,7 +1012,7 @@ def process_local(
         # -s (syncdeps) means makepkg may call `sudo pacman -S` for missing
         # build/check deps, so this must go through the shared lock.
         result = task.run_exclusive(
-            ["makepkg", "-fsc", "--noconfirm"],
+            makepkg_build_command(keep_src),
             cwd=directory,
             extra_env={"PKGDEST": str(directory)},
         )
@@ -1015,7 +1025,13 @@ def process_local(
     task.queue(entry, packages, force=force)
 
 
-def process_aur(entry: str, task: Task, check_only: bool, force: bool = False) -> None:
+def process_aur(
+    entry: str,
+    task: Task,
+    check_only: bool,
+    force: bool = False,
+    keep_src: bool = False,
+) -> None:
     task.log("Checking AUR version...")
 
     result = task.run(
@@ -1125,7 +1141,7 @@ def process_aur(entry: str, task: Task, check_only: bool, force: bool = False) -
 
     task.log(f"Rebuilding {entry}: {reason}.")
     result = task.run_exclusive(
-        ["makepkg", "-fsc", "--noconfirm"],
+        makepkg_build_command(keep_src),
         cwd=directory,
         extra_env={"PKGDEST": str(directory)},
     )
@@ -1149,7 +1165,12 @@ def process_aur(entry: str, task: Task, check_only: bool, force: bool = False) -
 
 
 def run_task(
-    kind: str, entry: str, board: StatusBoard, check_only: bool, force: bool = False
+    kind: str,
+    entry: str,
+    board: StatusBoard,
+    check_only: bool,
+    force: bool = False,
+    keep_src: bool = False,
 ) -> Task:
     """Dispatch a single install-list entry to its processing function.
 
@@ -1161,9 +1182,9 @@ def run_task(
     task = Task(board, label)
     try:
         if kind == "local":
-            process_local(entry, task, check_only, force)
+            process_local(entry, task, check_only, force, keep_src)
         elif kind == "aur":
-            process_aur(entry, task, check_only, force)
+            process_aur(entry, task, check_only, force, keep_src)
         else:
             process_ubuntu24(entry, task, check_only, force)
     except Exception:
@@ -1180,11 +1201,13 @@ class Installer:
         jobs: int,
         target: str | Sequence[str] | None = None,
         force: bool = False,
+        keep_src: bool = False,
     ) -> None:
         self.check_only = check_only
         self.jobs = jobs
         self.targets = (target,) if isinstance(target, str) else tuple(target or ())
         self.force = force
+        self.keep_src = keep_src
         self.stats = Stats()
         self.failed_entries: list[str] = []
         self.install_packages: list[Path] = []
@@ -1243,7 +1266,13 @@ class Installer:
             with ThreadPoolExecutor(max_workers=self.jobs) as pool:
                 futures = [
                     pool.submit(
-                        run_task, kind, entry, board, self.check_only, self.force
+                        run_task,
+                        kind,
+                        entry,
+                        board,
+                        self.check_only,
+                        self.force,
+                        self.keep_src,
                     )
                     for kind, entry in jobs
                 ]
@@ -1461,6 +1490,11 @@ def parse_args() -> argparse.Namespace:
         help="remove src and pkg directories from package builds, keeping archives",
     )
     parser.add_argument(
+        "--keep-src",
+        action="store_true",
+        help="keep src and pkg directories after makepkg builds",
+    )
+    parser.add_argument(
         "-j",
         "--jobs",
         type=int,
@@ -1476,6 +1510,8 @@ def parse_args() -> argparse.Namespace:
         parser.error("--force cannot be combined with --check, --list, or --clean")
     if args.clean and (args.check or args.list):
         parser.error("--clean cannot be combined with --check or --list")
+    if args.clean and args.keep_src:
+        parser.error("--clean cannot be combined with --keep-src")
     if args.clean and len(args.target) > 1:
         parser.error("--clean accepts at most one target")
     return args
@@ -1607,6 +1643,7 @@ def main() -> int:
         jobs=max(1, args.jobs),
         target=args.target,
         force=args.force,
+        keep_src=args.keep_src,
     ).run()
 
 
