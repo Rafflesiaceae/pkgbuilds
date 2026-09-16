@@ -204,10 +204,10 @@ def _send_sudo_notification(context: str) -> None:
             [
                 "notify-send",
                 "--app-name=install.py",
-                "--urgency=critical",
+                "--urgency=low",
                 "--icon=dialog-password",
-                "Sudo authentication may be required",
-                f"{context} may be waiting for your password in the terminal.",
+                "install.py might need your attention",
+                "",
             ],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
