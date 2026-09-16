@@ -1098,6 +1098,17 @@ class Installer:
             return entries
         return [entry for entry in entries if entry == self.target]
 
+    def _has_local_target(self, marker: str) -> bool:
+        """Accept an explicit package checkout outside the install lists."""
+        if self.target is None or not valid_entry(self.target):
+            return False
+        directory = PKGBUILD_ROOT / self.target
+        return (
+            directory.is_dir()
+            and not directory.is_symlink()
+            and (directory / marker).is_file()
+        )
+
     def _target_not_found(self, lists: str) -> int:
         print(
             f"{RED}ERROR: Target {self.target!r} was not found in {lists}.{RESET}",
@@ -1150,7 +1161,11 @@ class Installer:
             board.stop()
 
     def run(self) -> int:
-        if not INSTALL_LIST.is_file() and not INSTALL_LIST_AUR.is_file():
+        if (
+            self.target is None
+            and not INSTALL_LIST.is_file()
+            and not INSTALL_LIST_AUR.is_file()
+        ):
             print(
                 f"{RED}ERROR: Neither install-list nor install-list-aur exists.{RESET}",
                 file=sys.stderr,
@@ -1168,7 +1183,7 @@ class Installer:
         return self._run_arch()
 
     def _run_ubuntu24(self) -> int:
-        """Process all install-list entries via their ubuntu24.py scripts."""
+        """Process configured entries or an explicit local ubuntu24.py script."""
         jobs: list[tuple[str, str]] = []
         for entry in self._selected_entries(INSTALL_LIST):
             if not valid_entry(entry):
@@ -1178,8 +1193,15 @@ class Installer:
                 continue
             jobs.append(("ubuntu24", entry))
 
+        if (
+            self.target is not None
+            and not jobs
+            and self._has_local_target("ubuntu24.py")
+        ):
+            jobs.append(("ubuntu24", self.target))
+
         if self.target is not None and not jobs:
-            return self._target_not_found("install-list")
+            return self._target_not_found("install-list or a local ubuntu24.py directory")
 
         self._run_jobs(jobs)
 
@@ -1206,10 +1228,7 @@ class Installer:
         return 1 if self.stats.failed else 0
 
     def _run_arch(self) -> int:
-        """Process all install-list and install-list-aur entries via pacman/AUR."""
-        if not self.check_only:
-            AUR_BUILD_ROOT.mkdir(parents=True, exist_ok=True)
-
+        """Process configured entries or an explicit local PKGBUILD."""
         jobs: list[tuple[str, str]] = []
         for entry in self._selected_entries(INSTALL_LIST):
             if not valid_entry(entry):
@@ -1227,8 +1246,17 @@ class Installer:
                 continue
             jobs.append(("aur", entry))
 
+        if self.target is not None and not jobs and self._has_local_target("PKGBUILD"):
+            # Explicit local checkouts need no install-list entry.
+            jobs.append(("local", self.target))
+
         if self.target is not None and not jobs:
-            return self._target_not_found("install-list or install-list-aur")
+            return self._target_not_found(
+                "install-list, install-list-aur, or a local PKGBUILD directory"
+            )
+
+        if not self.check_only and any(kind == "aur" for kind, _ in jobs):
+            AUR_BUILD_ROOT.mkdir(parents=True, exist_ok=True)
 
         # Local and AUR entries are submitted together so network-bound AUR
         # checks and disk/CPU-bound local builds overlap instead of running
@@ -1295,7 +1323,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "target",
         nargs="?",
-        help="process only this package entry (or package directory with --clean)",
+        help="process only this package entry or local package directory",
     )
     parser.add_argument(
         "-c",

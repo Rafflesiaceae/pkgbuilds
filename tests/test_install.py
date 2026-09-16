@@ -244,6 +244,49 @@ class InstallerSummaryTest(unittest.TestCase):
 
 
 class InstallerTargetTest(unittest.TestCase):
+    def test_arch_target_selects_unlisted_local_checkout(self) -> None:
+        installer = install.Installer(check_only=True, jobs=2, target="chromium")
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root) / "chromium"
+            directory.mkdir()
+            (directory / "PKGBUILD").touch()
+
+            with (
+                patch.object(install, "PKGBUILD_ROOT", Path(root)),
+                patch.object(install, "read_package_list", return_value=["other"]),
+                patch.object(installer, "_run_jobs") as run_jobs,
+                patch.object(sys, "stdout", output),
+            ):
+                result = installer._run_arch()
+
+        self.assertEqual(result, 0)
+        run_jobs.assert_called_once_with([("local", "chromium")])
+
+    def test_unlisted_local_target_works_without_install_lists(self) -> None:
+        installer = install.Installer(check_only=True, jobs=2, target="chromium")
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as root:
+            package_root = Path(root)
+            directory = package_root / "chromium"
+            directory.mkdir()
+            (directory / "PKGBUILD").touch()
+
+            with (
+                patch.object(install, "PKGBUILD_ROOT", package_root),
+                patch.object(install, "INSTALL_LIST", package_root / "install-list"),
+                patch.object(install, "INSTALL_LIST_AUR", package_root / "install-list-aur"),
+                patch.object(install, "is_ubuntu_24", return_value=False),
+                patch.object(installer, "_run_jobs") as run_jobs,
+                patch.object(sys, "stdout", output),
+            ):
+                result = installer.run()
+
+        self.assertEqual(result, 0)
+        run_jobs.assert_called_once_with([("local", "chromium")])
+
     def test_arch_target_selects_only_matching_local_entry(self) -> None:
         installer = install.Installer(check_only=True, jobs=2, target="rustdesk")
         output = io.StringIO()
@@ -299,6 +342,48 @@ class InstallerTargetTest(unittest.TestCase):
 
         self.assertEqual(result, 0)
         run_jobs.assert_called_once_with([("ubuntu24", "rustdesk")])
+
+    def test_ubuntu_target_selects_unlisted_local_checkout(self) -> None:
+        installer = install.Installer(check_only=True, jobs=2, target="local-script")
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as root:
+            directory = Path(root) / "local-script"
+            directory.mkdir()
+            (directory / "ubuntu24.py").touch()
+
+            with (
+                patch.object(install, "PKGBUILD_ROOT", Path(root)),
+                patch.object(install, "read_package_list", return_value=["other"]),
+                patch.object(installer, "_run_jobs") as run_jobs,
+                patch.object(sys, "stdout", output),
+            ):
+                result = installer._run_ubuntu24()
+
+        self.assertEqual(result, 0)
+        run_jobs.assert_called_once_with([("ubuntu24", "local-script")])
+
+    def test_unlisted_aur_checkout_is_not_selected(self) -> None:
+        installer = install.Installer(check_only=True, jobs=2, target="aur-only")
+        error = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as root:
+            package_root = Path(root)
+            directory = package_root / ".aur-build" / "aur-only"
+            directory.mkdir(parents=True)
+            (directory / "PKGBUILD").touch()
+
+            with (
+                patch.object(install, "PKGBUILD_ROOT", package_root),
+                patch.object(install, "read_package_list", return_value=["other"]),
+                patch.object(installer, "_run_jobs") as run_jobs,
+                patch.object(sys, "stderr", error),
+            ):
+                result = installer._run_arch()
+
+        self.assertEqual(result, 1)
+        run_jobs.assert_not_called()
+        self.assertIn("Target 'aur-only' was not found", error.getvalue())
 
     def test_unknown_target_fails_without_running_jobs(self) -> None:
         installer = install.Installer(check_only=True, jobs=2, target="missing")
