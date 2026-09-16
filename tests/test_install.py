@@ -539,6 +539,19 @@ class InstallerTargetTest(unittest.TestCase):
         self.assertTrue(args.check)
         self.assertEqual(args.target, ["rustdesk"])
 
+    def test_short_check_and_clean_options_select_distinct_modes(self) -> None:
+        with patch.object(sys, "argv", ["install.py", "-ck", "rustdesk"]):
+            check_args = install.parse_args()
+        with patch.object(sys, "argv", ["install.py", "-c", "rustdesk"]):
+            clean_args = install.parse_args()
+
+        self.assertTrue(check_args.check)
+        self.assertFalse(check_args.clean)
+        self.assertEqual(check_args.target, ["rustdesk"])
+        self.assertTrue(clean_args.clean)
+        self.assertFalse(clean_args.check)
+        self.assertEqual(clean_args.target, ["rustdesk"])
+
     def test_force_selects_only_requested_targets(self) -> None:
         installer = install.Installer(
             check_only=False, jobs=2, target=["local-one", "aur-one"], force=True

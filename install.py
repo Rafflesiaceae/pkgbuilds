@@ -1437,7 +1437,7 @@ def parse_args() -> argparse.Namespace:
         help="process only these package entries or local package directories",
     )
     parser.add_argument(
-        "-c",
+        "-ck",
         "--check",
         action="store_true",
         help="check for updates without building or installing packages",
@@ -1455,6 +1455,7 @@ def parse_args() -> argparse.Namespace:
         help="list all available package targets and exit",
     )
     parser.add_argument(
+        "-c",
         "--clean",
         action="store_true",
         help="remove src and pkg directories from package builds, keeping archives",
