@@ -806,9 +806,10 @@ def aur_build_is_current(
     return True, ""
 
 
-def process_ubuntu24(entry: str, task: Task, check_only: bool) -> None:
-    """Check, then (if needed) install <entry>/ubuntu24.py for an
-    Ubuntu 24.x system.
+def process_ubuntu24(
+    entry: str, task: Task, check_only: bool, force: bool = False
+) -> None:
+    """Check or install <entry>/ubuntu24.py for an Ubuntu 24.x system.
 
     In the non-check-only flow, ubuntu24.py's own --install already runs
     check_up_to_date() first and reports which branch it took via exit
@@ -846,7 +847,10 @@ def process_ubuntu24(entry: str, task: Task, check_only: bool) -> None:
     task.log(f"Running ubuntu24.py --install for {entry}...")
     # Installing may run apt-get under the hood, so this goes through the
     # shared package-manager lock.
-    result = task.run_exclusive(["python", script, "--install"], cwd=directory)
+    result = task.run_exclusive(
+        ["python", script, "--install", *(["--force"] if force else [])],
+        cwd=directory,
+    )
     # Exit code 2 means check_up_to_date() skipped the build (already
     # current); 0 means it actually built/installed; anything else failed.
     if result.returncode == 2:
@@ -860,7 +864,9 @@ def process_ubuntu24(entry: str, task: Task, check_only: bool) -> None:
     task.processed = 1
 
 
-def process_local(entry: str, task: Task, check_only: bool) -> None:
+def process_local(
+    entry: str, task: Task, check_only: bool, force: bool = False
+) -> None:
     directory = PKGBUILD_ROOT / entry
 
     if not directory.is_dir():
@@ -910,7 +916,8 @@ def process_local(entry: str, task: Task, check_only: bool) -> None:
         task.fail(f"makepkg produced no package list for {entry}")
         return
 
-    if find_built_package(entry, packages) is None:
+    # A forced run rebuilds even when makepkg's expected archive exists.
+    if force or find_built_package(entry, packages) is None:
         # -s (syncdeps) means makepkg may call `sudo pacman -S` for missing
         # build/check deps, so this must go through the shared lock.
         result = task.run_exclusive(
@@ -924,10 +931,10 @@ def process_local(entry: str, task: Task, check_only: bool) -> None:
     else:
         task.log("Reusing existing package file(s).")
 
-    task.queue(entry, packages)
+    task.queue(entry, packages, force=force)
 
 
-def process_aur(entry: str, task: Task, check_only: bool) -> None:
+def process_aur(entry: str, task: Task, check_only: bool, force: bool = False) -> None:
     task.log("Checking AUR version...")
 
     result = task.run(
@@ -969,7 +976,7 @@ def process_aur(entry: str, task: Task, check_only: bool) -> None:
 
     if check_only:
         return
-    if current_version is not None and comparison < 0:
+    if not force and current_version is not None and comparison < 0:
         return
 
     directory = AUR_BUILD_ROOT / aur_pkgbase
@@ -1021,7 +1028,7 @@ def process_aur(entry: str, task: Task, check_only: bool) -> None:
             task.fail(f"Could not update dependencies for {entry}")
             return
 
-    package = find_cached_aur_package(directory, entry, aur_version)
+    package = None if force else find_cached_aur_package(directory, entry, aur_version)
     if package is not None:
         current, reason = aur_build_is_current(directory, package, dependencies, task)
         if current:
@@ -1030,6 +1037,8 @@ def process_aur(entry: str, task: Task, check_only: bool) -> None:
             )
             task.queue(entry, [package])
             return
+    elif force:
+        reason = "forced rebuild"
     else:
         reason = "package archive is missing"
 
@@ -1054,11 +1063,13 @@ def process_aur(entry: str, task: Task, check_only: bool) -> None:
         return
 
     info = package_info(package)
-    force = bool(info and current_version == info[1])
-    task.queue(entry, packages, force=force)
+    reinstall = force or bool(info and current_version == info[1])
+    task.queue(entry, packages, force=reinstall)
 
 
-def run_task(kind: str, entry: str, board: StatusBoard, check_only: bool) -> Task:
+def run_task(
+    kind: str, entry: str, board: StatusBoard, check_only: bool, force: bool = False
+) -> Task:
     """Dispatch a single install-list entry to its processing function.
 
     Runs in a worker thread. Any uncaught exception (e.g. a vercmp parsing
@@ -1069,11 +1080,11 @@ def run_task(kind: str, entry: str, board: StatusBoard, check_only: bool) -> Tas
     task = Task(board, label)
     try:
         if kind == "local":
-            process_local(entry, task, check_only)
+            process_local(entry, task, check_only, force)
         elif kind == "aur":
-            process_aur(entry, task, check_only)
+            process_aur(entry, task, check_only, force)
         else:
-            process_ubuntu24(entry, task, check_only)
+            process_ubuntu24(entry, task, check_only, force)
     except Exception:
         task.fail("Unexpected error")
         task.log(traceback.format_exc().rstrip())
@@ -1082,36 +1093,43 @@ def run_task(kind: str, entry: str, board: StatusBoard, check_only: bool) -> Tas
 
 
 class Installer:
-    def __init__(self, check_only: bool, jobs: int, target: str | None = None) -> None:
+    def __init__(
+        self,
+        check_only: bool,
+        jobs: int,
+        target: str | Sequence[str] | None = None,
+        force: bool = False,
+    ) -> None:
         self.check_only = check_only
         self.jobs = jobs
-        self.target = target
+        self.targets = (target,) if isinstance(target, str) else tuple(target or ())
+        self.force = force
         self.stats = Stats()
         self.failed_entries: list[str] = []
         self.install_packages: list[Path] = []
         self.force_install_packages: list[Path] = []
 
     def _selected_entries(self, path: Path) -> list[str]:
-        """Return every configured entry, or only the requested target."""
+        """Return every configured entry, or only the requested targets."""
         entries = read_package_list(path)
-        if self.target is None:
+        if not self.targets:
             return entries
-        return [entry for entry in entries if entry == self.target]
+        return [entry for entry in entries if entry in self.targets]
 
-    def _has_local_target(self, marker: str) -> bool:
+    def _has_local_target(self, target: str, marker: str) -> bool:
         """Accept an explicit package checkout outside the install lists."""
-        if self.target is None or not valid_entry(self.target):
+        if not valid_entry(target):
             return False
-        directory = PKGBUILD_ROOT / self.target
+        directory = PKGBUILD_ROOT / target
         return (
             directory.is_dir()
             and not directory.is_symlink()
             and (directory / marker).is_file()
         )
 
-    def _target_not_found(self, lists: str) -> int:
+    def _target_not_found(self, target: str, lists: str) -> int:
         print(
-            f"{RED}ERROR: Target {self.target!r} was not found in {lists}.{RESET}",
+            f"{RED}ERROR: Target {target!r} was not found in {lists}.{RESET}",
             file=sys.stderr,
         )
         return 1
@@ -1140,7 +1158,9 @@ class Installer:
         try:
             with ThreadPoolExecutor(max_workers=self.jobs) as pool:
                 futures = [
-                    pool.submit(run_task, kind, entry, board, self.check_only)
+                    pool.submit(
+                        run_task, kind, entry, board, self.check_only, self.force
+                    )
                     for kind, entry in jobs
                 ]
                 for future in as_completed(futures):
@@ -1162,7 +1182,7 @@ class Installer:
 
     def run(self) -> int:
         if (
-            self.target is None
+            not self.targets
             and not INSTALL_LIST.is_file()
             and not INSTALL_LIST_AUR.is_file()
         ):
@@ -1172,9 +1192,10 @@ class Installer:
             )
             return 1
 
-        if self.target is not None and not valid_entry(self.target):
-            print(f"{RED}ERROR: Invalid target: {self.target}{RESET}", file=sys.stderr)
-            return 1
+        for target in self.targets:
+            if not valid_entry(target):
+                print(f"{RED}ERROR: Invalid target: {target}{RESET}", file=sys.stderr)
+                return 1
 
         # Dispatch to the Ubuntu 24.x flow when running on that distro.
         if is_ubuntu_24():
@@ -1193,15 +1214,17 @@ class Installer:
                 continue
             jobs.append(("ubuntu24", entry))
 
-        if (
-            self.target is not None
-            and not jobs
-            and self._has_local_target("ubuntu24.py")
-        ):
-            jobs.append(("ubuntu24", self.target))
-
-        if self.target is not None and not jobs:
-            return self._target_not_found("install-list or a local ubuntu24.py directory")
+        # Add explicit local checkouts absent from install-list, then reject
+        # unknown targets before starting any package work.
+        selected = {entry for _, entry in jobs}
+        for target in self.targets:
+            if target not in selected and self._has_local_target(target, "ubuntu24.py"):
+                jobs.append(("ubuntu24", target))
+                selected.add(target)
+            if target not in selected:
+                return self._target_not_found(
+                    target, "install-list or a local ubuntu24.py directory"
+                )
 
         self._run_jobs(jobs)
 
@@ -1246,14 +1269,18 @@ class Installer:
                 continue
             jobs.append(("aur", entry))
 
-        if self.target is not None and not jobs and self._has_local_target("PKGBUILD"):
-            # Explicit local checkouts need no install-list entry.
-            jobs.append(("local", self.target))
-
-        if self.target is not None and not jobs:
-            return self._target_not_found(
-                "install-list, install-list-aur, or a local PKGBUILD directory"
-            )
+        # Explicit local checkouts need no install-list entry. Resolve every
+        # target before building so a typo cannot cause a partial install.
+        selected = {entry for _, entry in jobs}
+        for target in self.targets:
+            if target not in selected and self._has_local_target(target, "PKGBUILD"):
+                jobs.append(("local", target))
+                selected.add(target)
+            if target not in selected:
+                return self._target_not_found(
+                    target,
+                    "install-list, install-list-aur, or a local PKGBUILD directory",
+                )
 
         if not self.check_only and any(kind == "aur" for kind, _ in jobs):
             AUR_BUILD_ROOT.mkdir(parents=True, exist_ok=True)
@@ -1322,14 +1349,20 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "target",
-        nargs="?",
-        help="process only this package entry or local package directory",
+        nargs="*",
+        help="process only these package entries or local package directories",
     )
     parser.add_argument(
         "-c",
         "--check",
         action="store_true",
         help="check for updates without building or installing packages",
+    )
+    parser.add_argument(
+        "-f",
+        "--force",
+        action="store_true",
+        help="rebuild and reinstall packages even when already current",
     )
     parser.add_argument(
         "-l",
@@ -1350,11 +1383,16 @@ def parse_args() -> argparse.Namespace:
         metavar="N",
         help=f"number of packages to check/build concurrently (default: {DEFAULT_JOBS})",
     )
-    args = parser.parse_args()
-    if args.list and args.target is not None:
+    # Allow an option such as --force between multiple positional targets.
+    args = parser.parse_intermixed_args()
+    if args.list and args.target:
         parser.error("--list cannot be combined with a target")
+    if args.force and (args.check or args.list or args.clean):
+        parser.error("--force cannot be combined with --check, --list, or --clean")
     if args.clean and (args.check or args.list):
         parser.error("--clean cannot be combined with --check or --list")
+    if args.clean and len(args.target) > 1:
+        parser.error("--clean accepts at most one target")
     return args
 
 
@@ -1478,11 +1516,12 @@ def main() -> int:
     if args.list:
         return list_targets()
     if args.clean:
-        return clean_build_directories(args.target)
+        return clean_build_directories(args.target[0] if args.target else None)
     return Installer(
         check_only=args.check,
         jobs=max(1, args.jobs),
         target=args.target,
+        force=args.force,
     ).run()
 
 

@@ -363,6 +363,24 @@ class InstallerTargetTest(unittest.TestCase):
         self.assertEqual(result, 0)
         run_jobs.assert_called_once_with([("ubuntu24", "local-script")])
 
+    def test_ubuntu_force_selects_multiple_targets(self) -> None:
+        installer = install.Installer(
+            check_only=False, jobs=2, target=["first", "third"], force=True
+        )
+        with (
+            patch.object(
+                install, "read_package_list", return_value=["first", "second", "third"]
+            ),
+            patch.object(installer, "_run_jobs") as run_jobs,
+            patch.object(sys, "stdout", io.StringIO()),
+        ):
+            result = installer._run_ubuntu24()
+
+        self.assertEqual(result, 0)
+        run_jobs.assert_called_once_with(
+            [("ubuntu24", "first"), ("ubuntu24", "third")]
+        )
+
     def test_unlisted_aur_checkout_is_not_selected(self) -> None:
         installer = install.Installer(check_only=True, jobs=2, target="aur-only")
         error = io.StringIO()
@@ -405,7 +423,209 @@ class InstallerTargetTest(unittest.TestCase):
             args = install.parse_args()
 
         self.assertTrue(args.check)
-        self.assertEqual(args.target, "rustdesk")
+        self.assertEqual(args.target, ["rustdesk"])
+
+    def test_force_selects_only_requested_targets(self) -> None:
+        installer = install.Installer(
+            check_only=False, jobs=2, target=["local-one", "aur-one"], force=True
+        )
+
+        def package_entries(path):
+            if path == install.INSTALL_LIST:
+                return ["local-one", "local-two"]
+            return ["aur-one", "aur-two"]
+
+        with (
+            patch.object(install, "read_package_list", side_effect=package_entries),
+            patch.object(installer, "_run_jobs") as run_jobs,
+            patch.object(install, "AUR_BUILD_ROOT", Path(tempfile.gettempdir())),
+            patch.object(sys, "stdout", io.StringIO()),
+        ):
+            result = installer._run_arch()
+
+        self.assertEqual(result, 0)
+        self.assertTrue(installer.force)
+        run_jobs.assert_called_once_with(
+            [("local", "local-one"), ("aur", "aur-one")]
+        )
+
+    def test_missing_target_prevents_partial_force_run(self) -> None:
+        installer = install.Installer(
+            check_only=False, jobs=2, target=["known", "missing"], force=True
+        )
+        with (
+            patch.object(install, "read_package_list", return_value=["known"]),
+            patch.object(installer, "_run_jobs") as run_jobs,
+            patch.object(sys, "stderr", io.StringIO()) as error,
+        ):
+            result = installer._run_arch()
+
+        self.assertEqual(result, 1)
+        run_jobs.assert_not_called()
+        self.assertIn("Target 'missing' was not found", error.getvalue())
+
+    def test_force_flag_is_passed_to_installer(self) -> None:
+        with (
+            patch.object(sys, "argv", ["install.py", "-f", "local-one", "aur-one"]),
+            patch.object(install, "Installer") as installer,
+        ):
+            installer.return_value.run.return_value = 0
+            result = install.main()
+
+        self.assertEqual(result, 0)
+        self.assertTrue(installer.call_args.kwargs["force"])
+        self.assertEqual(
+            installer.call_args.kwargs["target"], ["local-one", "aur-one"]
+        )
+        installer.return_value.run.assert_called_once_with()
+
+    def test_force_option_can_appear_between_targets(self) -> None:
+        with patch.object(
+            sys, "argv", ["install.py", "local-one", "--force", "aur-one"]
+        ):
+            args = install.parse_args()
+
+        self.assertTrue(args.force)
+        self.assertEqual(args.target, ["local-one", "aur-one"])
+
+    def test_force_cannot_be_combined_with_check(self) -> None:
+        with (
+            patch.object(sys, "argv", ["install.py", "--force", "--check"]),
+            patch.object(sys, "stderr", io.StringIO()),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            install.parse_args()
+
+        self.assertEqual(raised.exception.code, 2)
+
+
+class ForceInstallTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.task = install.Task(
+            install.StatusBoard(enabled=False), "LOCAL: example"
+        )
+
+    def test_local_force_rebuilds_cached_archive_and_queues_reinstall(self) -> None:
+        directory = self.root / "example"
+        directory.mkdir()
+        (directory / "PKGBUILD").touch()
+        package = directory / "example-1-1-x86_64.pkg.tar.zst"
+        package.touch()
+
+        with (
+            patch.object(install, "PKGBUILD_ROOT", self.root),
+            patch.object(install, "makepkg_package_list", return_value=[package]),
+            patch.object(install, "find_built_package", return_value=package),
+            patch.object(
+                self.task,
+                "run_exclusive",
+                return_value=subprocess.CompletedProcess([], 0),
+            ) as build,
+        ):
+            install.process_local("example", self.task, check_only=False, force=True)
+
+        self.assertTrue(self.task.ok)
+        self.assertEqual(self.task.queued_force, package)
+        build.assert_called_once_with(
+            ["makepkg", "-fsc", "--noconfirm"],
+            cwd=directory,
+            extra_env={"PKGDEST": str(directory)},
+        )
+
+    def test_aur_force_bypasses_newer_installed_version_and_cached_build(self) -> None:
+        aur_root = self.root / ".aur-build"
+        directory = aur_root / "example"
+        (directory / ".git").mkdir(parents=True)
+        (directory / "PKGBUILD").touch()
+        package = directory / "example-1-1-x86_64.pkg.tar.zst"
+
+        with (
+            patch.object(install, "AUR_BUILD_ROOT", aur_root),
+            patch.object(
+                self.task,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    [], 0, "Version: 1.0\nPackage Base: example\n", ""
+                ),
+            ),
+            patch.object(install, "installed_version", return_value="2.0"),
+            patch.object(install, "compare_versions", return_value=-1),
+            patch.object(install, "makepkg_dependencies", return_value=set()),
+            patch.object(install, "find_cached_aur_package") as cached,
+            patch.object(install, "makepkg_package_list", return_value=[package]),
+            patch.object(install, "find_built_package", return_value=package),
+            patch.object(install, "package_info", return_value=("example", "1.0")),
+            patch.object(
+                self.task,
+                "run_exclusive",
+                return_value=subprocess.CompletedProcess([], 0),
+            ) as build,
+        ):
+            install.process_aur("example", self.task, check_only=False, force=True)
+
+        self.assertTrue(self.task.ok)
+        self.assertEqual(self.task.queued_force, package)
+        cached.assert_not_called()
+        build.assert_called_once_with(
+            ["makepkg", "-fsc", "--noconfirm"],
+            cwd=directory,
+            extra_env={"PKGDEST": str(directory)},
+        )
+
+    def test_ubuntu_force_passes_flag_to_package_script(self) -> None:
+        directory = self.root / "example"
+        directory.mkdir()
+        script = directory / "ubuntu24.py"
+        script.touch()
+
+        with (
+            patch.object(install, "PKGBUILD_ROOT", self.root),
+            patch.object(
+                self.task,
+                "run_exclusive",
+                return_value=subprocess.CompletedProcess([], 0),
+            ) as build,
+        ):
+            install.process_ubuntu24(
+                "example", self.task, check_only=False, force=True
+            )
+
+        self.assertEqual(self.task.rebuilt, 1)
+        build.assert_called_once_with(
+            ["python", script, "--install", "--force"], cwd=directory
+        )
+
+    def test_force_reinstall_omits_pacman_needed(self) -> None:
+        installer = install.Installer(check_only=False, jobs=1, force=True)
+        package = self.root / "example-1-1-x86_64.pkg.tar.zst"
+
+        def package_entries(path):
+            return ["example", "other"] if path == install.INSTALL_LIST else []
+
+        def queue_package(_jobs):
+            installer.force_install_packages.append(package)
+
+        with (
+            patch.object(install, "read_package_list", side_effect=package_entries),
+            patch.object(installer, "_run_jobs", side_effect=queue_package) as run_jobs,
+            patch.object(
+                install,
+                "command",
+                return_value=subprocess.CompletedProcess([], 0),
+            ) as command,
+            patch.object(install, "notify_sudo_prompt"),
+            patch.object(sys, "stdout", io.StringIO()),
+        ):
+            result = installer._run_arch()
+
+        self.assertEqual(result, 0)
+        run_jobs.assert_called_once_with(
+            [("local", "example"), ("local", "other")]
+        )
+        command.assert_called_once_with(["sudo", "pacman", "-U", "--", package])
 
 
 class ListTargetsTest(unittest.TestCase):
