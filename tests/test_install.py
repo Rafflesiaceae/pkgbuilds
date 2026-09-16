@@ -115,6 +115,54 @@ class CommandStreamingTest(unittest.TestCase):
         self.assertCountEqual(lines, ["ready", "result", "warning"])
 
 
+class BuildParallelismTest(unittest.TestCase):
+    def test_job_count_uses_available_cpus_with_a_cap_and_minimum(self) -> None:
+        for cores, expected in [(1, 1), (3, 2), (8, 5), (24, 16), (48, 16)]:
+            with self.subTest(cores=cores):
+                with patch.object(
+                    install.os, "sched_getaffinity", return_value=set(range(cores))
+                ):
+                    self.assertEqual(install.build_job_count(), expected)
+
+    def test_job_count_falls_back_to_cpu_count(self) -> None:
+        with (
+            patch.object(install.os, "sched_getaffinity", side_effect=OSError),
+            patch.object(install.os, "cpu_count", return_value=6),
+        ):
+            self.assertEqual(install.build_job_count(), 4)
+
+    def test_build_environment_passes_limit_to_make_and_cmake(self) -> None:
+        with (
+            patch.dict(os.environ, {"MAKEFLAGS": "-l 4 -j99", "PATH": "/bin:/usr/bin"}),
+            patch.object(install, "build_job_count", return_value=5),
+        ):
+            env = install.build_environment()
+
+        self.assertEqual(env["MAKEFLAGS"], "-l 4 -j99 -j5")
+        self.assertEqual(env["CMAKE_BUILD_PARALLEL_LEVEL"], "5")
+        self.assertEqual(env["INSTALL_PY_BUILD_JOBS"], "5")
+
+    def test_ninja_wrapper_passes_job_limit_and_arguments(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            fake_ninja = Path(root) / "ninja"
+            fake_ninja.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+            fake_ninja.chmod(0o755)
+            env = os.environ | {
+                "PATH": f"{install.SUDO_WRAPPER.parent}:{root}:/usr/bin",
+                "INSTALL_PY_BUILD_JOBS": "5",
+            }
+            result = subprocess.run(
+                [install.SUDO_WRAPPER.parent / "ninja", "-C", "build"],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["-j", "5", "-C", "build"])
+
+
 class InteractiveSudoTest(unittest.TestCase):
     def test_missing_sudo_timestamp_is_authenticated_outside_spinner(self) -> None:
         board = install.StatusBoard(enabled=True)

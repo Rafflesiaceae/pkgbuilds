@@ -230,8 +230,9 @@ def notify_sudo_prompt(context: str) -> None:
 def nested_sudo_environment(
     context: str, extra_env: dict[str, str] | None
 ) -> dict[str, str]:
-    """Route child sudo calls through the notification-aware wrapper."""
+    """Route child sudo and Ninja calls through their wrappers."""
     env = dict(extra_env or {})
+    env.update(build_environment())
     inherited_path = env.get("PATH", os.environ.get("PATH", ""))
     env["PATH"] = f"{SUDO_WRAPPER.parent}{os.pathsep}{inherited_path}"
     env["INSTALL_PY_STARTED_AT"] = str(PROCESS_STARTED_AT)
@@ -830,6 +831,28 @@ def makepkg_build_command(keep_src: bool) -> list[str]:
     """Build a package, optionally retaining makepkg's work directories."""
     # makepkg's -c removes both src and pkg after a successful build.
     return ["makepkg", "-fs" if keep_src else "-fsc", "--noconfirm"]
+
+
+def build_job_count() -> int:
+    """Use two thirds of the CPUs available to this process, capped at 16."""
+    try:
+        cores = len(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        cores = os.cpu_count() or 1
+    return min(16, max(1, cores * 2 // 3))
+
+
+def build_environment() -> dict[str, str]:
+    """Limit Make, CMake builds, and direct Ninja invocations in child builds."""
+    jobs = str(build_job_count())
+    makeflags = os.environ.get("MAKEFLAGS", "").strip()
+    # Keep other user Make flags, with the requested job count taking precedence.
+    makeflags = f"{makeflags} -j{jobs}".strip()
+    return {
+        "MAKEFLAGS": makeflags,
+        "CMAKE_BUILD_PARALLEL_LEVEL": jobs,
+        "INSTALL_PY_BUILD_JOBS": jobs,
+    }
 
 
 def aur_build_is_current(

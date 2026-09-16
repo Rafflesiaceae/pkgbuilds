@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+
+"""Apply install.py's build job count to direct Ninja invocations."""
+
+import os
+import shutil
+import sys
+from pathlib import Path
+
+
+wrapper_dir = Path(__file__).resolve().parent
+# Preserve build-specific PATH entries while excluding this wrapper from lookup.
+search_path = os.pathsep.join(
+    entry
+    for entry in os.environ.get("PATH", os.defpath).split(os.pathsep)
+    if Path(entry or ".").resolve() != wrapper_dir
+)
+real_ninja = shutil.which("ninja", path=search_path)
+if real_ninja is None:
+    sys.exit("ninja: command not found")
+
+os.execv(real_ninja, [real_ninja, "-j", os.environ["INSTALL_PY_BUILD_JOBS"], *sys.argv[1:]])
