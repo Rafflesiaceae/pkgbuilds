@@ -32,6 +32,7 @@ SEPARATOR = "=" * 64
 
 # Default worker count for the parallel check/build phase (-j/--jobs).
 DEFAULT_JOBS = 4
+JOBS_MAXCOUNT = 12
 
 # Avoid an immediate desktop alert while the user is still watching startup.
 SUDO_NOTIFICATION_AFTER_SECONDS = 5.0
@@ -834,12 +835,12 @@ def makepkg_build_command(keep_src: bool) -> list[str]:
 
 
 def build_job_count() -> int:
-    """Use two thirds of the CPUs available to this process, capped at 16."""
+    """Use two thirds of the CPUs available to this process, capped at JOBS_MAXCOUNT."""
     try:
         cores = len(os.sched_getaffinity(0))
     except (AttributeError, OSError):
         cores = os.cpu_count() or 1
-    return min(16, max(1, cores * 2 // 3))
+    return min(JOBS_MAXCOUNT, max(1, cores * 2 // 3))
 
 
 def build_environment() -> dict[str, str]:
