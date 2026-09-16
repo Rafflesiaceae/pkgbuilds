@@ -588,7 +588,7 @@ class InstallerTargetTest(unittest.TestCase):
         self.assertEqual(args.target, ["rustdesk"])
 
     def test_short_check_and_clean_options_select_distinct_modes(self) -> None:
-        with patch.object(sys, "argv", ["install.py", "-ck", "rustdesk"]):
+        with patch.object(sys, "argv", ["install.py", "-k", "rustdesk"]):
             check_args = install.parse_args()
         with patch.object(sys, "argv", ["install.py", "-c", "rustdesk"]):
             clean_args = install.parse_args()

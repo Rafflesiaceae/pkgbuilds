@@ -1489,7 +1489,7 @@ def parse_args() -> argparse.Namespace:
         help="process only these package entries or local package directories",
     )
     parser.add_argument(
-        "-ck",
+        "-k",
         "--check",
         action="store_true",
         help="check for updates without building or installing packages",
