@@ -151,7 +151,7 @@ _pkgname='rustdesk'
 pkgname="${_pkgname}"
 _pkgver='1.4.9'
 pkgver="${_pkgver//-/.}"
-pkgrel=2
+pkgrel=3
 _sfx=''
 #_sfx='-pr1-998b758'
 _HBB=( # dates are retrieved from git fetch; tig. Every version gets a specific hbb.
@@ -563,8 +563,8 @@ EOF
      set +x
      false
   fi
-  # Make every source icon monochrome before it is embedded during compilation.
-  find 'src' -type f -name '*.ico' -exec magick mogrify -monochrome {} +
+  # Linux embeds this ICO in the tray binary. Invert its light background.
+  magick mogrify -monochrome -negate 'res/tray-icon.ico'
   #cd '..'; cp -pr "${_srcdir}" 'a'; ln -s "${_srcdir}" 'b'; cp -pr "${_srcdirfrb}" 'fa'; ln -s "${_srcdirfrb}" 'fb'; false
   #cd '..'; cp -pr "${_srcdirvc}" 'va'; ln -s "${_srcdirvc}" 'vb'; false
   #diff -pNaru5 'a' 'b' > "0000-$RANDOM@domain.patch"
