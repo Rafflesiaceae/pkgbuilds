@@ -199,25 +199,9 @@ def command(
 
 
 def _send_sudo_notification(context: str) -> None:
-    """Send a best-effort desktop alert for a possible sudo prompt."""
-    try:
-        subprocess.run(
-            [
-                "notify-send",
-                "--app-name=install.py",
-                "--urgency=low",
-                "--icon=dialog-password",
-                "install.py might need your attention",
-                "",
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            timeout=5,
-        )
-    # A missing or unresponsive notification service must not break installs.
-    except (OSError, subprocess.SubprocessError):
-        pass
+    """Keep the sudo notification hook while desktop alerts are disabled."""
+    # Sudo prompts remain available in the terminal without desktop alerts.
+    return
 
 
 def notify_sudo_prompt(context: str) -> None:
