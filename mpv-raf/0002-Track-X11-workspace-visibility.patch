@@ -1,0 +1,192 @@
+From 9e53a40be51186b9ad1eae1d484c72059b3ac5c1 Mon Sep 17 00:00:00 2001
+From: Rafflesiaceae <rafflesiaceae.plant@gmail.com>
+Date: Sat, 19 Sep 2026 16:55:07 +0200
+Subject: [PATCH 2/2] Track X11 workspace visibility
+
+Include the active EWMH desktop and the X11 map state when
+reporting window-visible.
+
+Subscribe to root _NET_CURRENT_DESKTOP changes and window map state
+notifications so workspace switches in i3 update the property even when
+_NET_WM_STATE_HIDDEN does not change.
+
+diff --git a/DOCS/man/input.rst b/DOCS/man/input.rst
+index 1c9ad748d9..5876589d4a 100644
+--- a/DOCS/man/input.rst
++++ b/DOCS/man/input.rst
+@@ -3113,9 +3113,9 @@ Property list
+     Whether the window has focus. Might not be supported by all VOs.
+ 
+ ``window-visible``
+-    Whether the VO window is visible. On X11, this is based on the
+-    ``_NET_WM_STATE_HIDDEN`` state and is independent of ``--force-render``.
+-    Might not be supported by all VOs.
++    Whether the VO window is visible. On X11, this includes whether the
++    window is mapped, minimized, and on the current desktop, and is
++    independent of ``--force-render``. Might not be supported by all VOs.
+ 
+ ``ambient-light``
+     Ambient lighting condition in lux. Only observable on macOS (macOS and Linux only)
+diff --git a/video/out/x11_common.c b/video/out/x11_common.c
+index 3367707387..127b888714 100644
+--- a/video/out/x11_common.c
++++ b/video/out/x11_common.c
+@@ -162,6 +162,7 @@ static void vo_x11_maximize(struct vo *vo);
+ static void vo_x11_minimize(struct vo *vo);
+ static void vo_x11_set_input_region(struct vo *vo, bool passthrough);
+ static void vo_x11_sticky(struct vo *vo, bool sticky);
++static void vo_x11_update_window_visible(struct vo *vo);
+ 
+ #define XA(x11, s) (XInternAtom((x11)->display, # s, False))
+ #define XAs(x11, s) XInternAtom((x11)->display, s, False)
+@@ -687,6 +688,7 @@ bool vo_x11_init(struct vo *vo)
+         .log = mp_log_new(x11, vo->log, "x11"),
+         .input_ctx = vo->input_ctx,
+         .screensaver_enabled = true,
++        .window_visible = true,
+         .xrandr_event = -1,
+         .wakeup_pipe = {-1, -1},
+         .dpi_scale = 1,
+@@ -715,6 +717,10 @@ bool vo_x11_init(struct vo *vo)
+     if (x11->opts->WinID >= 0)
+         x11->parent = x11->opts->WinID ? x11->opts->WinID : x11->rootwin;
+ 
++    // Workspace switches change _NET_CURRENT_DESKTOP on the root window.
++    if (!x11->parent)
++        XSelectInput(x11->display, x11->rootwin, PropertyChangeMask);
++
+     if (!x11->opts->native_keyrepeat) {
+         Bool ok = False;
+         XkbSetDetectableAutoRepeat(x11->display, True, &ok);
+@@ -1161,12 +1167,7 @@ static void vo_x11_check_net_wm_state_change(struct vo *vo)
+         }
+ 
+         opts->window_minimized = is_minimized;
+-        bool was_hidden = x11->hidden;
+         x11->hidden = is_minimized;
+-        // Notify the player only when actual X11 visibility changes. The
+-        // force-render option must not affect this window state.
+-        if (x11->hidden != was_hidden)
+-            x11->pending_vo_events |= VO_EVENT_WIN_VISIBLE;
+         m_config_cache_write_opt(x11->opts_cache, &opts->window_minimized);
+         opts->window_maximized = is_maximized;
+         m_config_cache_write_opt(x11->opts_cache, &opts->window_maximized);
+@@ -1192,6 +1193,8 @@ static void vo_x11_check_net_wm_state_change(struct vo *vo)
+             vo_x11_update_composition_hint(vo);
+         }
+     }
++
++    vo_x11_update_window_visible(vo);
+ }
+ 
+ static void vo_x11_check_net_wm_desktop_change(struct vo *vo)
+@@ -1208,6 +1211,55 @@ static void vo_x11_check_net_wm_desktop_change(struct vo *vo)
+         x11->opts->all_workspaces = params[0] == -1; // (gets sign-extended?)
+         m_config_cache_write_opt(x11->opts_cache, &x11->opts->all_workspaces);
+     }
++
++    vo_x11_update_window_visible(vo);
++}
++
++static bool vo_x11_get_window_visible(struct vo *vo)
++{
++    struct vo_x11_state *x11 = vo->x11;
++
++    if (x11->hidden)
++        return false;
++    if (x11->parent || !x11->window)
++        return true;
++
++    XWindowAttributes attrs;
++    if (XGetWindowAttributes(x11->display, x11->window, &attrs) &&
++        attrs.map_state == IsUnmapped)
++    {
++        return false;
++    }
++
++    long window_desktop = 0;
++    if (!x11_get_property_copy(x11, x11->window, XA(x11, _NET_WM_DESKTOP),
++                               XA_CARDINAL, 32, &window_desktop,
++                               sizeof(window_desktop)) || window_desktop == -1)
++    {
++        return true;
++    }
++
++    long current_desktop = 0;
++    if (!x11_get_property_copy(x11, x11->rootwin,
++                               XA(x11, _NET_CURRENT_DESKTOP), XA_CARDINAL, 32,
++                               &current_desktop, sizeof(current_desktop)))
++    {
++        return true;
++    }
++
++    return window_desktop == current_desktop;
++}
++
++static void vo_x11_update_window_visible(struct vo *vo)
++{
++    struct vo_x11_state *x11 = vo->x11;
++    bool visible = vo_x11_get_window_visible(vo);
++    if (visible == x11->window_visible)
++        return;
++
++    // force-render affects drawing only, not whether the window is visible.
++    x11->window_visible = visible;
++    x11->pending_vo_events |= VO_EVENT_WIN_VISIBLE;
+ }
+ 
+ // Releasing all keys on key-up or defocus is simpler and ensures no keys can
+@@ -1347,6 +1399,10 @@ void vo_x11_check_events(struct vo *vo)
+             x11->pseudo_mapped = true;
+             x11->current_screen = -1;
+             vo_x11_update_geometry(vo);
++            vo_x11_update_window_visible(vo);
++            break;
++        case UnmapNotify:
++            vo_x11_update_window_visible(vo);
+             break;
+         case DestroyNotify:
+             MP_WARN(x11, "Our window was destroyed, exiting\n");
+@@ -1375,6 +1431,9 @@ void vo_x11_check_events(struct vo *vo)
+                 vo_x11_check_net_wm_state_change(vo);
+             } else if (Event.xproperty.atom == XA(x11, _NET_WM_DESKTOP)) {
+                 vo_x11_check_net_wm_desktop_change(vo);
++            } else if (Event.xproperty.window == x11->rootwin &&
++                       Event.xproperty.atom == XA(x11, _NET_CURRENT_DESKTOP)) {
++                vo_x11_update_window_visible(vo);
+             } else if (Event.xproperty.atom == x11->icc_profile_property) {
+                 x11->pending_vo_events |= VO_EVENT_ICC_PROFILE_CHANGED;
+             }
+@@ -1847,6 +1906,7 @@ void vo_x11_config_vo_window(struct vo *vo)
+ 
+     wait_until_mapped(vo);
+     vo_x11_update_geometry(vo);
++    vo_x11_update_window_visible(vo);
+     update_vo_size(vo);
+     x11->pending_vo_events &= ~VO_EVENT_RESIZE; // implicitly done by the VO
+ 
+@@ -2192,8 +2252,10 @@ int vo_x11_control(struct vo *vo, int *events, int request, void *arg)
+         return VO_TRUE;
+     }
+     case VOCTRL_GET_VISIBLE: {
+-        // Report the window state itself, independently of force-render.
+-        *(bool *)arg = !x11->hidden;
++        // Report actual mapped/workspace visibility independently of
++        // force-render.
++        vo_x11_update_window_visible(vo);
++        *(bool *)arg = x11->window_visible;
+         return VO_TRUE;
+     }
+     case VOCTRL_GET_DISPLAY_NAMES: {
+diff --git a/video/out/x11_common.h b/video/out/x11_common.h
+index e3375de65a..4e0163195e 100644
+--- a/video/out/x11_common.h
++++ b/video/out/x11_common.h
+@@ -88,6 +88,7 @@ struct vo_x11_state {
+ 
+     int wm_type;
+     bool hidden; // _NET_WM_STATE_HIDDEN
++    bool window_visible; // cached mapped and current-workspace state
+     bool window_hidden; // the window was mapped at least once
+     bool pseudo_mapped; // not necessarily mapped, but known window size
+     int fs;     // whether we assume the window is in fullscreen mode

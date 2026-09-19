@@ -1,0 +1,158 @@
+From 3568ff565c8ca0dfa903e75242f97e5b2f75d461 Mon Sep 17 00:00:00 2001
+From: Rafflesiaceae <rafflesiaceae.plant@gmail.com>
+Date: Sat, 19 Sep 2026 16:27:20 +0200
+Subject: [PATCH 1/2] Add window-visible property
+
+Expose the X11 hidden window state as a normal read-only mpv
+property so Lua and other clients can observe it.
+
+Add a VO control for querying actual visibility independently of
+--force-render, notify window-state observers only when the hidden state
+changes, and document the new property.
+
+diff --git a/DOCS/interface-changes/window-visible.txt b/DOCS/interface-changes/window-visible.txt
+new file mode 100644
+index 0000000000..ed748452d8
+--- /dev/null
++++ b/DOCS/interface-changes/window-visible.txt
+@@ -0,0 +1 @@
++add `window-visible` property
+diff --git a/DOCS/man/input.rst b/DOCS/man/input.rst
+index 090be45023..1c9ad748d9 100644
+--- a/DOCS/man/input.rst
++++ b/DOCS/man/input.rst
+@@ -3112,6 +3112,11 @@ Property list
+ ``focused``
+     Whether the window has focus. Might not be supported by all VOs.
+ 
++``window-visible``
++    Whether the VO window is visible. On X11, this is based on the
++    ``_NET_WM_STATE_HIDDEN`` state and is independent of ``--force-render``.
++    Might not be supported by all VOs.
++
+ ``ambient-light``
+     Ambient lighting condition in lux. Only observable on macOS (macOS and Linux only)
+ 
+diff --git a/player/command.c b/player/command.c
+index da61e1c8f8..61302396aa 100644
+--- a/player/command.c
++++ b/player/command.c
+@@ -2989,6 +2989,21 @@ static int mp_property_focused(void *ctx, struct m_property *prop,
+     return m_property_bool_ro(action, arg, focused);
+ }
+ 
++static int mp_property_window_visible(void *ctx, struct m_property *prop,
++                                      int action, void *arg)
++{
++    MPContext *mpctx = ctx;
++    struct vo *vo = mpctx->video_out;
++    if (!vo)
++        return M_PROPERTY_UNAVAILABLE;
++
++    bool visible;
++    if (vo_control(vo, VOCTRL_GET_VISIBLE, &visible) < 1)
++        return M_PROPERTY_UNAVAILABLE;
++
++    return m_property_bool_ro(action, arg, visible);
++}
++
+ static int mp_property_display_names(void *ctx, struct m_property *prop,
+                                      int action, void *arg)
+ {
+@@ -4827,6 +4842,7 @@ static const struct m_property mp_properties_base[] = {
+     {"sub-bitrate", mp_property_packet_bitrate, .priv = (void *)&(const int){STREAM_SUB}},
+ 
+     {"focused", mp_property_focused},
++    {"window-visible", mp_property_window_visible},
+     {"display-names", mp_property_display_names},
+     {"display-fps", mp_property_display_fps},
+     {"estimated-display-fps", mp_property_estimated_display_fps},
+@@ -4923,6 +4939,7 @@ static const char *const *const mp_event_property_change[] = {
+       "osd-par", "osd-dimensions"),
+     E(MP_EVENT_WIN_STATE, "display-names", "display-fps", "display-width",
+       "display-height"),
++    E(MP_EVENT_WIN_VISIBLE, "window-visible"),
+     E(MP_EVENT_WIN_STATE2, "display-hidpi-scale"),
+     E(MP_EVENT_FOCUS, "focused"),
+     E(MP_EVENT_AMBIENT_LIGHTING_CHANGED, "ambient-light"),
+diff --git a/player/command.h b/player/command.h
+index d1183829e0..06c4cf1bf9 100644
+--- a/player/command.h
++++ b/player/command.h
+@@ -105,6 +105,7 @@ enum {
+     MP_EVENT_CACHE_UPDATE,
+     MP_EVENT_WIN_RESIZE,
+     MP_EVENT_WIN_STATE,
++    MP_EVENT_WIN_VISIBLE,
+     MP_EVENT_WIN_STATE2,
+     MP_EVENT_FOCUS,
+     MP_EVENT_AMBIENT_LIGHTING_CHANGED,
+diff --git a/player/playloop.c b/player/playloop.c
+index e35b2e8639..3bf0a34ba9 100644
+--- a/player/playloop.c
++++ b/player/playloop.c
+@@ -905,6 +905,8 @@ static void handle_vo_events(struct MPContext *mpctx)
+         mp_notify(mpctx, MP_EVENT_WIN_RESIZE, NULL);
+     if (events & VO_EVENT_WIN_STATE)
+         mp_notify(mpctx, MP_EVENT_WIN_STATE, NULL);
++    if (events & VO_EVENT_WIN_VISIBLE)
++        mp_notify(mpctx, MP_EVENT_WIN_VISIBLE, NULL);
+     if (events & VO_EVENT_DPI)
+         mp_notify(mpctx, MP_EVENT_WIN_STATE2, NULL);
+     if (events & VO_EVENT_FOCUS)
+diff --git a/video/out/vo.h b/video/out/vo.h
+index f24918d460..9f7b02cf1e 100644
+--- a/video/out/vo.h
++++ b/video/out/vo.h
+@@ -48,10 +48,13 @@ enum {
+     // For VOCTRL_GET_HIDPI_SCALE changes.
+     VO_EVENT_DPI                        = 1 << 6,
+     VO_EVENT_FOCUS                      = 1 << 7,
++    // The window's visibility changed.
++    VO_EVENT_WIN_VISIBLE                = 1 << 8,
+ 
+     // Set of events the player core may be interested in.
+     VO_EVENTS_USER = VO_EVENT_RESIZE | VO_EVENT_WIN_STATE | VO_EVENT_DPI |
+-                     VO_EVENT_FOCUS | VO_EVENT_AMBIENT_LIGHTING_CHANGED,
++                     VO_EVENT_FOCUS | VO_EVENT_WIN_VISIBLE |
++                     VO_EVENT_AMBIENT_LIGHTING_CHANGED,
+ };
+ 
+ enum mp_voctrl {
+@@ -98,6 +101,7 @@ enum mp_voctrl {
+     VOCTRL_SET_UNFS_WINDOW_SIZE,        // int[2] (w/h)
+ 
+     VOCTRL_GET_FOCUSED,                 // bool*
++    VOCTRL_GET_VISIBLE,                 // bool*
+ 
+     // char *** (NULL terminated array compatible with CONF_TYPE_STRING_LIST)
+     // names for displays the window is on
+diff --git a/video/out/x11_common.c b/video/out/x11_common.c
+index f1131927a1..3367707387 100644
+--- a/video/out/x11_common.c
++++ b/video/out/x11_common.c
+@@ -1161,7 +1161,12 @@ static void vo_x11_check_net_wm_state_change(struct vo *vo)
+         }
+ 
+         opts->window_minimized = is_minimized;
++        bool was_hidden = x11->hidden;
+         x11->hidden = is_minimized;
++        // Notify the player only when actual X11 visibility changes. The
++        // force-render option must not affect this window state.
++        if (x11->hidden != was_hidden)
++            x11->pending_vo_events |= VO_EVENT_WIN_VISIBLE;
+         m_config_cache_write_opt(x11->opts_cache, &opts->window_minimized);
+         opts->window_maximized = is_maximized;
+         m_config_cache_write_opt(x11->opts_cache, &opts->window_maximized);
+@@ -2186,6 +2191,11 @@ int vo_x11_control(struct vo *vo, int *events, int request, void *arg)
+         *(bool *)arg = x11->has_focus;
+         return VO_TRUE;
+     }
++    case VOCTRL_GET_VISIBLE: {
++        // Report the window state itself, independently of force-render.
++        *(bool *)arg = !x11->hidden;
++        return VO_TRUE;
++    }
+     case VOCTRL_GET_DISPLAY_NAMES: {
+         if (!x11->pseudo_mapped)
+             return VO_FALSE;
