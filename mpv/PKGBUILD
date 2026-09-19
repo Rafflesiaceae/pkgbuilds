@@ -5,7 +5,10 @@
 
 pkgname=mpv
 epoch=1
-pkgver=0.41.0
+_mpv_ref='3568ff565c8ca0dfa903e75242f97e5b2f75d461'
+# Include the pinned ref in the package version so changing it invalidates
+# the cached archive and makes install.py rebuild and reinstall the package.
+pkgver=0.41.0.r55497.g${_mpv_ref:0:7}
 pkgrel=6
 pkgdesc='a free, open source, and cross-platform media player'
 arch=('x86_64')
@@ -23,7 +26,7 @@ makedepends=('git' 'meson' 'python-docutils' 'ladspa' 'wayland-protocols'
 optdepends=('yt-dlp: for video-sharing websites playback')
 provides=('libmpv.so')
 options=('!emptydirs')
-source=('git+https://github.com/Rafflesiaceae/mpv.git')
+source=("mpv::git+https://github.com/Rafflesiaceae/mpv.git#commit=${_mpv_ref}")
 # The fork is intentionally fetched without checksum or signature verification.
 sha256sums=('SKIP')
 

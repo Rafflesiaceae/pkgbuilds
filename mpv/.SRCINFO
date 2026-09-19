@@ -1,6 +1,6 @@
 pkgbase = mpv
 	pkgdesc = a free, open source, and cross-platform media player
-	pkgver = 0.41.0
+	pkgver = 0.41.0.r55497.g3568ff5
 	pkgrel = 6
 	epoch = 1
 	url = https://mpv.io/
@@ -60,7 +60,7 @@ pkgbase = mpv
 	optdepends = yt-dlp: for video-sharing websites playback
 	provides = libmpv.so
 	options = !emptydirs
-	source = git+https://github.com/Rafflesiaceae/mpv.git
+	source = mpv::git+https://github.com/Rafflesiaceae/mpv.git#commit=3568ff565c8ca0dfa903e75242f97e5b2f75d461
 	sha256sums = SKIP
 
 pkgname = mpv

@@ -290,16 +290,42 @@ def compare_versions(left: str, right: str) -> int:
     return int(result.stdout.strip())
 
 
+def package_provides(package: Path, wanted: str) -> bool:
+    """Return whether a package archive advertises the requested name."""
+    result = command(
+        ["bsdtar", "-xOf", package, ".PKGINFO"],
+        capture=True,
+        parsed_output=True,
+    )
+    if result.returncode != 0:
+        return False
+
+    # A local checkout may intentionally use a package name such as mpv-git
+    # while providing the directory's install-list name, such as mpv.
+    for line in result.stdout.splitlines():
+        key, separator, value = line.partition(" = ")
+        if separator and key == "provides" and dependency_name(value) == wanted:
+            return True
+    return False
+
+
 def find_built_package(
-    wanted: str, packages: Iterable[Path]
+    wanted: str, packages: Iterable[Path], *, accept_provides: bool = False
 ) -> Path | None:
+    provided_package: Path | None = None
     for package in packages:
         if not package.is_file():
             continue
         info = package_info(package)
         if info and info[0] == wanted:
             return package
-    return None
+        if (
+            accept_provides
+            and provided_package is None
+            and package_provides(package, wanted)
+        ):
+            provided_package = package
+    return provided_package
 
 
 def find_cached_aur_package(
@@ -731,9 +757,18 @@ class Task:
                 parsed_output=parsed_output,
             )
 
-    def queue(self, wanted: str, packages: Iterable[Path], *, force: bool = False) -> None:
+    def queue(
+        self,
+        wanted: str,
+        packages: Iterable[Path],
+        *,
+        force: bool = False,
+        accept_provides: bool = False,
+    ) -> None:
         packages = list(packages)
-        package = find_built_package(wanted, packages)
+        package = find_built_package(
+            wanted, packages, accept_provides=accept_provides
+        )
         if package is None:
             self.fail(f"Build produced no package named {wanted}")
             return
@@ -1019,8 +1054,12 @@ def process_local(
         task.fail(f"makepkg produced no package list for {entry}")
         return
 
-    # Continuing also rebuilds when makepkg's expected archive exists.
-    if force or continue_build or find_built_package(entry, packages) is None:
+    # Force and continue runs rebuild; local targets may resolve by provides.
+    if (
+        force
+        or continue_build
+        or find_built_package(entry, packages, accept_provides=True) is None
+    ):
         # -s (syncdeps) means makepkg may call `sudo pacman -S` for missing
         # build/check deps, so this must go through the shared lock.
         result = task.run_exclusive(
@@ -1034,7 +1073,12 @@ def process_local(
     else:
         task.log("Reusing existing package file(s).")
 
-    task.queue(entry, packages, force=force or continue_build)
+    task.queue(
+        entry,
+        packages,
+        force=force or continue_build,
+        accept_provides=True,
+    )
 
 
 def process_aur(
