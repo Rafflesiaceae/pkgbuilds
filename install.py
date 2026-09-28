@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import platform
 import queue
@@ -20,6 +21,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Callable, Iterable, Sequence
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 
 PKGBUILD_ROOT = Path(__file__).resolve().parent
@@ -27,6 +31,7 @@ INSTALL_LIST = PKGBUILD_ROOT / "install-list"
 INSTALL_LIST_AUR = PKGBUILD_ROOT / "install-list-aur"
 AUR_BUILD_ROOT = PKGBUILD_ROOT / ".aur-build"
 SUDO_WRAPPER = PKGBUILD_ROOT / "libexec" / "sudo"
+AUR_RPC_URL = "https://aur.archlinux.org/rpc/v5/info"
 
 SEPARATOR = "=" * 64
 
@@ -347,6 +352,52 @@ def parse_aur_info(output: str) -> tuple[str | None, str | None]:
         if separator:
             values[key.strip()] = value.strip()
     return values.get("Version"), values.get("Package Base")
+
+
+def aur_rpc_info(package_name: str) -> tuple[str, str]:
+    """Return (version, package base) for an exact AUR package name.
+
+    `yay -Si --aur` exposes the package version but, unlike the AUR RPC,
+    does not currently print the package base. The distinction matters for
+    split packages: for example, `lua51-cjson` lives in the `lua-cjson`
+    package-base Git repository.
+    """
+    query = urlencode([("arg[]", package_name)])
+    request = Request(
+        f"{AUR_RPC_URL}?{query}",
+        headers={"User-Agent": "pkgbuild-installer/1"},
+    )
+    try:
+        with urlopen(request, timeout=20) as response:
+            payload = json.load(response)
+    except (HTTPError, URLError, OSError, ValueError) as error:
+        raise RuntimeError(
+            f"Could not query AUR RPC metadata for {package_name}: {error}"
+        ) from error
+
+    results = payload.get("results")
+    if not isinstance(results, list) or len(results) != 1:
+        raise RuntimeError(
+            f"AUR RPC returned no unique result for {package_name}"
+        )
+
+    info = results[0]
+    if not isinstance(info, dict) or info.get("Name") != package_name:
+        raise RuntimeError(
+            f"AUR RPC returned unexpected package metadata for {package_name}"
+        )
+
+    version = info.get("Version")
+    package_base = info.get("PackageBase")
+    if not isinstance(version, str) or not version:
+        raise RuntimeError(
+            f"AUR RPC returned no version for {package_name}"
+        )
+    if not isinstance(package_base, str) or not package_base:
+        raise RuntimeError(
+            f"AUR RPC returned no package base for {package_name}"
+        )
+    return version, package_base
 
 
 def dependency_name(requirement: str) -> str:
@@ -1099,10 +1150,28 @@ def process_aur(
         return
 
     aur_version, aur_pkgbase = parse_aur_info(result.stdout)
-    aur_pkgbase = aur_pkgbase or entry
     if not aur_version:
         task.fail(f"Could not determine AUR version for {entry}")
         return
+
+    # Current yay -Si output does not include "Package Base", so resolve it
+    # from the AUR RPC instead of assuming pkgname == pkgbase. That assumption
+    # is wrong for split packages such as lua51-cjson -> lua-cjson and can
+    # select an obsolete checkout that still happens to exist locally.
+    if not aur_pkgbase:
+        task.log("Resolving AUR package base...")
+        try:
+            rpc_version, aur_pkgbase = aur_rpc_info(entry)
+        except RuntimeError as error:
+            task.fail(str(error))
+            return
+        if rpc_version != aur_version:
+            task.log(
+                f"AUR metadata changed while checking {entry}: "
+                f"yay reported {aur_version}, RPC reports {rpc_version}; "
+                "using the RPC version."
+            )
+            aur_version = rpc_version
 
     current_version = installed_version(entry)
     comparison = 0
@@ -1134,6 +1203,14 @@ def process_aur(
         return
 
     directory = AUR_BUILD_ROOT / aur_pkgbase
+    if aur_pkgbase != entry:
+        legacy_directory = AUR_BUILD_ROOT / entry
+        if legacy_directory != directory and (legacy_directory / ".git").is_dir():
+            task.log(
+                f"Ignoring package-name checkout {legacy_directory}; "
+                f"{entry} belongs to AUR package base {aur_pkgbase}."
+            )
+
     if (directory / ".git").is_dir():
         task.log("Updating cached PKGBUILD from AUR...")
         result = task.run(["git", "-C", directory, "pull", "--ff-only"])
