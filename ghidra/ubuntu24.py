@@ -214,21 +214,21 @@ def build(install: bool, skip_apt: bool) -> None:
     out_deb = Path(os.environ.get("OUT_DEB") or start_dir / f"{pkgname}_{version}-{revision}_{arch}.deb")
 
     # Ghidra is a self-contained Java application; stage the whole extracted
-    # tree under /usr/share/ghidra rather than splitting into bin/lib/share.
-    print("Staging into package root /usr/share/ghidra...")
-    share_dir = pkgroot / "usr" / "share" / "ghidra"
-    share_dir.parent.mkdir(parents=True)
-    run_cmd(["cp", "-a", root, share_dir])
+    # tree under /opt/ghidra rather than splitting into bin/lib/share.
+    print("Staging into package root /opt/ghidra...")
+    opt_dir = pkgroot / "opt" / "ghidra"
+    opt_dir.parent.mkdir(parents=True)
+    run_cmd(["cp", "-a", root, opt_dir])
 
     # Wrapper so the app is on PATH; ghidraRun resolves its own install
     # directory via $0's realpath, so a plain symlink works.
     bin_dir = pkgroot / "usr" / "bin"
     bin_dir.mkdir(parents=True)
-    os.symlink("/usr/share/ghidra/ghidraRun", bin_dir / "ghidra")
+    os.symlink("/opt/ghidra/ghidraRun", bin_dir / "ghidra")
 
     # Desktop entry for launcher menus; Icon is omitted if none is found
     # rather than pointing at a path that may not exist in this release.
-    icon = find_icon(share_dir)
+    icon = find_icon(opt_dir)
     applications_dir = pkgroot / "usr" / "share" / "applications"
     applications_dir.mkdir(parents=True)
     desktop_lines = [
