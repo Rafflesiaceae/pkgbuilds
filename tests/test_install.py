@@ -751,6 +751,51 @@ class InstallerTargetTest(unittest.TestCase):
         self.assertIn("--continue cannot be combined with --check", error.getvalue())
 
 
+class AurDownloadTest(unittest.TestCase):
+    def test_split_package_download_uses_current_pkgbase_checkout(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            aur_root = Path(root)
+            directory = aur_root / "lua-cjson"
+            legacy = aur_root / "lua51-cjson"
+            (legacy / ".git").mkdir(parents=True)
+            (legacy / "PKGBUILD").write_text("obsolete PKGBUILD\n")
+            package = directory / "lua51-cjson-2.1.0.19-1-x86_64.pkg.tar.zst"
+            task = install.Task(install.StatusBoard(enabled=False), "AUR: lua51-cjson")
+
+            def run(args, **kwargs):
+                if args[0] == "yay" and args[1] == "-Si":
+                    return subprocess.CompletedProcess([], 0, "Version: 2.1.0.19-1\n", "")
+                # Model the downloader's directory choice so querying the
+                # package name cannot silently reuse the obsolete checkout.
+                if args[0] == "git" and args[1] == "clone":
+                    destination = Path(args[-1])
+                    (destination / ".git").mkdir(parents=True)
+                    (destination / "PKGBUILD").write_text("current PKGBUILD\n")
+                    package.touch()
+                return subprocess.CompletedProcess([], 0, "", "")
+
+            with (
+                patch.object(install, "AUR_BUILD_ROOT", aur_root),
+                patch.object(task, "run", side_effect=run) as commands,
+                patch.object(install, "aur_rpc_info", return_value=("2.1.0.19-1", "lua-cjson")),
+                patch.object(install, "installed_version", return_value=None),
+                patch.object(install, "makepkg_dependencies", return_value=set()) as metadata,
+                patch.object(install, "find_cached_aur_package", return_value=package),
+                patch.object(install, "aur_build_is_current", return_value=(True, "")),
+                patch.object(install, "package_info", return_value=("lua51-cjson", "2.1.0.19-1")),
+            ):
+                install.process_aur("lua51-cjson", task, check_only=False)
+
+            self.assertTrue(task.ok, task.errors)
+            self.assertEqual(task.queued, package)
+            metadata.assert_called_once_with(directory, task)
+            commands.assert_any_call(
+                ["git", "clone", "https://aur.archlinux.org/lua-cjson.git", directory],
+                cwd=aur_root,
+            )
+            self.assertEqual((legacy / "PKGBUILD").read_text(), "obsolete PKGBUILD\n")
+
+
 class ForceInstallTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()

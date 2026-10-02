@@ -1221,9 +1221,15 @@ def process_aur(
         task.log(f"Downloading {entry} from AUR...")
         if directory.exists():
             shutil.rmtree(directory)
-        result = task.run(["yay", "-G", "--aur", entry], cwd=AUR_BUILD_ROOT)
+        # yay -G names its destination after the requested package and can
+        # reuse an obsolete checkout there. Clone the resolved package base
+        # directly so split packages use the same path for download and build.
+        result = task.run(
+            ["git", "clone", f"https://aur.archlinux.org/{aur_pkgbase}.git", directory],
+            cwd=AUR_BUILD_ROOT,
+        )
         if result.returncode != 0:
-            task.fail(f"yay failed to download {entry}")
+            task.fail(f"Could not clone AUR package base {aur_pkgbase} for {entry}")
             return
 
     if not (directory / "PKGBUILD").is_file():
