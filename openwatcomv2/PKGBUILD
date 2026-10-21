@@ -1,0 +1,30 @@
+# The Current-build release is a prebuilt toolchain snapshot, so no build step is needed.
+pkgname=openwatcomv2
+pkgver=2.0.20261020
+pkgrel=1
+pkgdesc="Open Watcom v2 compiler and development tools snapshot"
+arch=('x86_64')
+url="https://github.com/open-watcom/open-watcom-v2"
+license=('custom')
+depends=('glibc')
+
+source=("ow-snapshot.tar.xz::https://github.com/open-watcom/open-watcom-v2/releases/download/Current-build/ow-snapshot.tar.xz")
+sha256sums=('321e472879651390d624e5f7f8aa1f0e0e87b1ee7a1ef3608f8b07dd3cd3ee08')
+noextract=('ow-snapshot.tar.xz')
+
+package() {
+  install -d "$pkgdir/opt/watcom"
+  tar -xf "$srcdir/ow-snapshot.tar.xz" -C "$pkgdir/opt/watcom"
+
+  install -Dm644 "$pkgdir/opt/watcom/license.txt" \
+    "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+
+  install -Dm644 /dev/stdin "$pkgdir/etc/profile.d/openwatcom.sh" <<'EOF'
+# Set Open Watcom's compiler paths and default DOS include directory.
+export WATCOM=/opt/watcom
+export PATH="$WATCOM/binl64:$WATCOM/binw:$PATH"
+export INCLUDE="$WATCOM/h"
+export EDPATH="$WATCOM/eddat"
+export WIPFC="$WATCOM/wipfc"
+EOF
+}
