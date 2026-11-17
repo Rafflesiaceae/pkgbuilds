@@ -7,8 +7,8 @@ pkgname=mpv-raf
 conflicts=('mpv')
 provides=('mpv' 'libmpv.so')
 epoch=1
-pkgver=0.41.0
-pkgrel=7
+pkgver=0.42.0
+pkgrel=1
 pkgdesc='a free, open source, and cross-platform media player'
 arch=('x86_64')
 license=('GPL-2.0-or-later AND LGPL-2.1-or-later')
@@ -16,7 +16,7 @@ url='https://mpv.io/'
 depends=('alsa-lib' 'desktop-file-utils' 'ffmpeg' 'glibc' 'hicolor-icon-theme'
          'jack' 'lcms2' 'libarchive' 'libass' 'libbluray' 'libcdio'
          'libcdio-paranoia' 'libdisplay-info' 'libdrm' 'libdvdnav' 'libdvdread' 'libegl' 'libgl'
-         'libglvnd' 'libjpeg-turbo' 'libplacebo' 'libpulse' 'libsixel' 'libva'
+         'libglvnd' 'libjpeg-turbo' 'libplacebo>=7.387.0' 'libpulse' 'libsixel' 'libva'
          'libvdpau' 'libx11' 'libxext' 'libxkbcommon' 'libxpresent' 'libxrandr'
          'libxss' 'libxv' 'luajit' 'mesa' 'mujs' 'libpipewire' 'rubberband' 'sdl2'
          'openal' 'uchardet' 'vapoursynth' 'vulkan-icd-loader' 'wayland' 'zlib')
@@ -24,12 +24,13 @@ makedepends=('git' 'meson' 'python-docutils' 'ladspa' 'wayland-protocols'
              'ffnvcodec-headers' 'vulkan-headers')
 optdepends=('yt-dlp: for video-sharing websites playback')
 options=('!emptydirs')
-validpgpkeys=('145077D82501AA20152CACCE8D769208D5E31419') # sfan5 <sfan5@live.de>
+# Verify the release tag against kasper93's primary signing key.
+validpgpkeys=('DE537FA4CD83E657227D6461D6CA75F6505F42A5') # kasper93 <kasper93@gmail.com>
 # Name the checkout after the package so all build stages use one source path.
 source=("${pkgname}::git+https://github.com/mpv-player/mpv.git?signed#tag=v${pkgver}"
         '0001-Add-window-visible-property.patch'
         '0002-Track-X11-workspace-visibility.patch')
-sha256sums=('6d591780b86f20397697d8847e30b9bf864798b62615fa995395b7ce03a1e4f2'
+sha256sums=('b65fdea5cb43fd2cf2899ce785bacd9b08b8494faa801e3d1106fec4d537e71b'
            'f0bc4bccc3fe0d8baa3989ada69e4ba788d4373a673643ff4829072d8e2bd234'
            '628c37a2dbbc56e0ddbc1d01098ff600123e2cdf7779c02413294f40139bdb31')
 

@@ -1,7 +1,7 @@
 pkgbase = mpv-raf
 	pkgdesc = a free, open source, and cross-platform media player
-	pkgver = 0.41.0
-	pkgrel = 7
+	pkgver = 0.42.0
+	pkgrel = 1
 	epoch = 1
 	url = https://mpv.io/
 	arch = x86_64
@@ -33,7 +33,7 @@ pkgbase = mpv-raf
 	depends = libgl
 	depends = libglvnd
 	depends = libjpeg-turbo
-	depends = libplacebo
+	depends = libplacebo>=7.387.0
 	depends = libpulse
 	depends = libsixel
 	depends = libva
@@ -62,11 +62,11 @@ pkgbase = mpv-raf
 	provides = libmpv.so
 	conflicts = mpv
 	options = !emptydirs
-	source = mpv-raf::git+https://github.com/mpv-player/mpv.git?signed#tag=v0.41.0
+	source = mpv-raf::git+https://github.com/mpv-player/mpv.git?signed#tag=v0.42.0
 	source = 0001-Add-window-visible-property.patch
 	source = 0002-Track-X11-workspace-visibility.patch
-	validpgpkeys = 145077D82501AA20152CACCE8D769208D5E31419
-	sha256sums = 6d591780b86f20397697d8847e30b9bf864798b62615fa995395b7ce03a1e4f2
+	validpgpkeys = DE537FA4CD83E657227D6461D6CA75F6505F42A5
+	sha256sums = b65fdea5cb43fd2cf2899ce785bacd9b08b8494faa801e3d1106fec4d537e71b
 	sha256sums = f0bc4bccc3fe0d8baa3989ada69e4ba788d4373a673643ff4829072d8e2bd234
 	sha256sums = 628c37a2dbbc56e0ddbc1d01098ff600123e2cdf7779c02413294f40139bdb31
 
@@ -91,7 +91,7 @@ pkgname = mpv-raf
 	depends = libgl
 	depends = libglvnd
 	depends = libjpeg-turbo
-	depends = libplacebo
+	depends = libplacebo>=7.387.0
 	depends = libpulse
 	depends = libsixel
 	depends = libva
