@@ -34,8 +34,10 @@ sha256sums=('6d591780b86f20397697d8847e30b9bf864798b62615fa995395b7ce03a1e4f2'
            '628c37a2dbbc56e0ddbc1d01098ff600123e2cdf7779c02413294f40139bdb31')
 
 prepare() {
-  # Apply the two upstream commits in their original order to the pinned tag.
   cd "${pkgname}"
+  # makepkg resets tracked sources but leaves this patch-created file behind.
+  rm -f DOCS/interface-changes/window-visible.txt
+  # Apply the two upstream commits in their original order to the pinned tag.
   patch -Np1 -i ../0001-Add-window-visible-property.patch
   patch -Np1 -i ../0002-Track-X11-workspace-visibility.patch
 }
